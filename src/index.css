@@ -1,0 +1,111 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 45% 96%;
+    --foreground: 222 42% 12%;
+    --card: 222 30% 98%;
+    --card-foreground: 222 42% 12%;
+    --primary: 262 78% 58%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 220 40% 94%;
+    --secondary-foreground: 222 42% 14%;
+    --muted: 220 40% 94%;
+    --muted-foreground: 215 18% 45%;
+    --accent: 220 40% 96%;
+    --accent-foreground: 222 42% 14%;
+    --border: 220 28% 86%;
+    --input: 220 28% 86%;
+    --ring: 262 78% 58%;
+    --radius: 16px;
+    --accent-read: 200 100% 65%;
+  }
+
+  .dark {
+    --background: 225 35% 9%;
+    --foreground: 210 40% 98%;
+    --card: 225 30% 14%;
+    --card-foreground: 210 40% 98%;
+    --primary: 262 80% 62%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 225 24% 18%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 225 24% 18%;
+    --muted-foreground: 215 25% 70%;
+    --accent: 230 24% 20%;
+    --accent-foreground: 210 40% 98%;
+    --border: 225 22% 24%;
+    --input: 225 22% 24%;
+    --ring: 262 80% 62%;
+    --accent-read: 200 100% 65%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply text-foreground font-sans antialiased;
+    background: radial-gradient(circle at top left, rgba(91, 88, 235, 0.35), transparent 50%),
+      radial-gradient(circle at 80% 10%, rgba(86, 225, 233, 0.35), transparent 45%),
+      radial-gradient(circle at 20% 80%, rgba(91, 88, 235, 0.25), transparent 50%),
+      linear-gradient(160deg, #eef3ff 0%, #c9e4ff 40%, #b8c5ff 100%);
+    min-height: 100vh;
+  }
+
+  .dark body {
+    background: radial-gradient(circle at top left, rgba(91, 88, 235, 0.45), transparent 55%),
+      radial-gradient(circle at 80% 10%, rgba(86, 225, 233, 0.35), transparent 45%),
+      radial-gradient(circle at 30% 85%, rgba(88, 128, 255, 0.35), transparent 55%),
+      linear-gradient(160deg, #0b1a33 0%, #101f3f 50%, #0a1328 100%);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(99, 102, 241, 0.55) transparent;
+  }
+
+  .dark * {
+    scrollbar-color: rgba(147, 197, 253, 0.4) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.45);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  .dark *::-webkit-scrollbar-thumb {
+    background: rgba(147, 197, 253, 0.35);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply border border-white/15 bg-white/10 backdrop-blur-xl shadow-[0_20px_50px_rgba(15,23,42,0.2)];
+  }
+
+  .glass-hover {
+    @apply transition hover:bg-white/20 dark:hover:bg-white/10;
+  }
+
+  .glass-soft {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+}
