@@ -13,6 +13,7 @@ import {
   Paperclip,
   Phone,
   Video,
+  VideoOff,
   ChevronUp,
   ChevronDown,
   Settings,
@@ -28,6 +29,7 @@ import {
   X,
   Plus,
   ArrowLeft,
+  Minus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -180,10 +182,25 @@ function App() {
     status: 'idle',
     mode: 'video',
   })
+  const [remoteVideoReady, setRemoteVideoReady] = useState(false)
+  const [callMinimized, setCallMinimized] = useState(false)
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+  const [localLevel, setLocalLevel] = useState(0)
+  const [remoteLevel, setRemoteLevel] = useState(0)
+  const [cameraEnabled, setCameraEnabled] = useState(true)
+  const [remoteCameraOn, setRemoteCameraOn] = useState(true)
   const socketRef = useRef<Socket | null>(null)
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const localVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null)
+  const remoteMiniRef = useRef<HTMLVideoElement | null>(null)
+  const localAudioCtxRef = useRef<AudioContext | null>(null)
+  const remoteAudioCtxRef = useRef<AudioContext | null>(null)
+  const localRafRef = useRef<number | null>(null)
+  const remoteRafRef = useRef<number | null>(null)
+  const cameraEnabledRef = useRef(cameraEnabled)
+  const localPreviewRef = useRef<MediaStream | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const ringtoneRef = useRef<{ stop: () => void } | null>(null)
@@ -191,6 +208,8 @@ function App() {
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const callStateRef = useRef(callState)
   const chatSearchRef = useRef<HTMLDivElement | null>(null)
+  const activeIdRef = useRef<string | null>(null)
+  const userRef = useRef<User | null>(null)
 
   const authHeader = useMemo(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -203,6 +222,18 @@ function App() {
   useEffect(() => {
     callStateRef.current = callState
   }, [callState])
+
+  useEffect(() => {
+    cameraEnabledRef.current = cameraEnabled
+  }, [cameraEnabled])
+
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
+
+  useEffect(() => {
+    userRef.current = user
+  }, [user])
 
   useEffect(() => {
     const raw = localStorage.getItem('chatapp_prefs')
@@ -331,11 +362,11 @@ function App() {
 
     socket.on('message:new', (payload) => {
       const message = mapMessage(payload)
-      if (message.conversationId === activeId) {
+      if (message.conversationId === activeIdRef.current) {
         setMessages((prev) =>
           prev.some((item) => item.id === message.id) ? prev : [...prev, message]
         )
-        if (message.senderId !== user?.id) {
+        if (message.senderId !== userRef.current?.id) {
           markConversationRead(message.conversationId)
         }
       }
@@ -355,7 +386,7 @@ function App() {
             : chat
         )
       )
-      if (message.senderId !== user?.id) {
+      if (message.senderId !== userRef.current?.id) {
         playPing()
       }
     })
@@ -395,7 +426,13 @@ function App() {
     })
 
     socket.on('call:offer', (payload) => {
-      if (payload.conversationId !== activeId) return
+      if (payload.conversationId) {
+        setActiveId(payload.conversationId)
+      }
+      if (payload.mode === 'video') {
+        setCameraEnabled(true)
+        setRemoteCameraOn(true)
+      }
       setCallState({
         status: 'incoming',
         mode: payload.mode,
@@ -405,27 +442,35 @@ function App() {
     })
 
     socket.on('typing:start', (payload) => {
-      if (payload.conversationId !== activeId) return
+      if (payload.conversationId !== activeIdRef.current) return
       setTypingUsers((prev) =>
         prev.includes(payload.userId) ? prev : [...prev, payload.userId]
       )
     })
 
     socket.on('typing:stop', (payload) => {
-      if (payload.conversationId !== activeId) return
+      if (payload.conversationId !== activeIdRef.current) return
       setTypingUsers((prev) => prev.filter((id) => id !== payload.userId))
     })
 
     socket.on('call:answer', async (payload) => {
-      if (payload.conversationId !== activeId) return
+      if (!callStateRef.current.conversationId) return
+      if (payload.conversationId !== callStateRef.current.conversationId) return
       if (peerRef.current && payload.sdp) {
         await peerRef.current.setRemoteDescription(payload.sdp)
         setCallState((prev) => ({ ...prev, status: 'in-call' }))
       }
     })
 
+    socket.on('call:camera', (payload) => {
+      if (!callStateRef.current.conversationId) return
+      if (payload.conversationId !== callStateRef.current.conversationId) return
+      setRemoteCameraOn(Boolean(payload.enabled))
+    })
+
     socket.on('call:ice', async (payload) => {
-      if (payload.conversationId !== activeId) return
+      if (!callStateRef.current.conversationId) return
+      if (payload.conversationId !== callStateRef.current.conversationId) return
       if (peerRef.current && payload.candidate) {
         try {
           await peerRef.current.addIceCandidate(payload.candidate)
@@ -443,7 +488,7 @@ function App() {
       socket.disconnect()
       socketRef.current = null
     }
-  }, [token, activeId])
+  }, [token])
 
   useEffect(() => {
     if (!friendsOpen) return
@@ -503,6 +548,138 @@ function App() {
       setChatSearchIndex(0)
     }
   }, [chatSearchQuery])
+
+  useEffect(() => {
+    if (!remoteStream) return
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = remoteStream
+    }
+    if (remoteMiniRef.current) {
+      remoteMiniRef.current.srcObject = remoteStream
+    }
+  }, [remoteStream])
+
+  const startLocalPreview = async () => {
+    if (localPreviewRef.current) return
+    const previewStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false,
+    })
+    localPreviewRef.current = previewStream
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = previewStream
+      localVideoRef.current.play().catch(() => {})
+    }
+  }
+
+  const stopLocalPreview = () => {
+    if (localPreviewRef.current) {
+      localPreviewRef.current.getTracks().forEach((track) => track.stop())
+      localPreviewRef.current = null
+    }
+    if (localVideoRef.current && !localStreamRef.current) {
+      localVideoRef.current.srcObject = null
+    }
+  }
+
+  const startAudioMeter = (
+    stream: MediaStream,
+    setLevel: (value: number) => void,
+    ctxRef: React.MutableRefObject<AudioContext | null>,
+    rafRef: React.MutableRefObject<number | null>
+  ) => {
+    if (stream.getAudioTracks().length === 0) {
+      setLevel(0)
+      return
+    }
+    const AudioContextImpl = window.AudioContext || (window as any).webkitAudioContext
+    const audioContext = new AudioContextImpl()
+    ctxRef.current = audioContext
+    const analyser = audioContext.createAnalyser()
+    analyser.fftSize = 256
+    const source = audioContext.createMediaStreamSource(stream)
+    source.connect(analyser)
+    const data = new Uint8Array(analyser.frequencyBinCount)
+    const tick = () => {
+      analyser.getByteTimeDomainData(data)
+      let sum = 0
+      for (let i = 0; i < data.length; i += 1) {
+        const value = (data[i] - 128) / 128
+        sum += value * value
+      }
+      const rms = Math.sqrt(sum / data.length)
+      setLevel(Math.min(1, rms * 2.5))
+      rafRef.current = window.requestAnimationFrame(tick)
+    }
+    tick()
+  }
+
+  const stopAudioMeter = (
+    ctxRef: React.MutableRefObject<AudioContext | null>,
+    rafRef: React.MutableRefObject<number | null>,
+    setLevel: (value: number) => void
+  ) => {
+    if (rafRef.current) {
+      window.cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (ctxRef.current) {
+      ctxRef.current.close().catch(() => {})
+      ctxRef.current = null
+    }
+    setLevel(0)
+  }
+
+  useEffect(() => {
+    if (!localStream) return
+    startAudioMeter(localStream, setLocalLevel, localAudioCtxRef, localRafRef)
+    return () => stopAudioMeter(localAudioCtxRef, localRafRef, setLocalLevel)
+  }, [localStream])
+
+  useEffect(() => {
+    if (!localStream || !cameraEnabled) return
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream
+      localVideoRef.current.play().catch(() => {})
+    }
+  }, [localStream, cameraEnabled])
+
+  useEffect(() => {
+    if (!remoteStream) return
+    startAudioMeter(remoteStream, setRemoteLevel, remoteAudioCtxRef, remoteRafRef)
+    return () => stopAudioMeter(remoteAudioCtxRef, remoteRafRef, setRemoteLevel)
+  }, [remoteStream])
+
+  useEffect(() => {
+    if (!remoteStream) return
+    const videoTracks = remoteStream.getVideoTracks()
+    if (videoTracks.length === 0) {
+      setRemoteCameraOn(false)
+      return
+    }
+    const track = videoTracks[0]
+    const handleMute = () => setRemoteCameraOn(false)
+    const handleUnmute = () => setRemoteCameraOn(true)
+    track.addEventListener('mute', handleMute)
+    track.addEventListener('unmute', handleUnmute)
+    setRemoteCameraOn(!track.muted)
+    return () => {
+      track.removeEventListener('mute', handleMute)
+      track.removeEventListener('unmute', handleUnmute)
+    }
+  }, [remoteStream])
+
+  useEffect(() => {
+    if (callState.status !== 'incoming' || callState.mode !== 'video') {
+      stopLocalPreview()
+      return
+    }
+    if (cameraEnabled) {
+      startLocalPreview().catch(() => {})
+    } else {
+      stopLocalPreview()
+    }
+  }, [callState.status, callState.mode, cameraEnabled])
 
   useEffect(() => {
     if (!chatSearchOpen) return
@@ -1082,15 +1259,19 @@ function App() {
       }
     }
     peer.ontrack = (event) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0]
-      }
+      setRemoteStream(event.streams[0])
     }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: true,
       video: mode === 'video',
     })
     localStreamRef.current = stream
+    setLocalStream(stream)
+    if (mode === 'video' && !cameraEnabledRef.current) {
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = false
+      })
+    }
     stream.getTracks().forEach((track) => peer.addTrack(track, stream))
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream
@@ -1102,6 +1283,10 @@ function App() {
     if (!activeConversation || activeConversation.type !== 'direct' || !socketRef.current) {
       return
     }
+    setCameraEnabled(mode === 'video')
+    setRemoteCameraOn(true)
+    setCallMinimized(false)
+    setRemoteVideoReady(false)
     setMicMuted(false)
     setSpeakerMuted(false)
     const conversationId = activeConversation.id
@@ -1118,6 +1303,11 @@ function App() {
 
   const acceptCall = async () => {
     if (!callState.offer || !callState.conversationId) return
+    stopLocalPreview()
+    setCameraEnabled(callState.mode === 'video')
+    setRemoteCameraOn(true)
+    setCallMinimized(false)
+    setRemoteVideoReady(false)
     const peer = await setupPeerConnection(callState.conversationId, callState.mode)
     await peer.setRemoteDescription(callState.offer)
     const answer = await peer.createAnswer()
@@ -1143,15 +1333,56 @@ function App() {
     }
     localStreamRef.current?.getTracks().forEach((track) => track.stop())
     localStreamRef.current = null
+    setLocalStream(null)
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null
     }
     if (remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = null
     }
+    if (remoteMiniRef.current) {
+      remoteMiniRef.current.srcObject = null
+    }
+    setRemoteStream(null)
+    setRemoteCameraOn(true)
+    stopLocalPreview()
     setMicMuted(false)
     setSpeakerMuted(false)
+    setRemoteVideoReady(false)
+    setCallMinimized(false)
+    setCameraEnabled(true)
     setCallState({ status: 'idle', mode: callStateRef.current.mode })
+  }
+
+  const toggleCamera = async () => {
+    if (callState.mode !== 'video') return
+    if (localStreamRef.current) {
+      const next = !cameraEnabled
+      setCameraEnabled(next)
+      localStreamRef.current.getVideoTracks().forEach((track) => {
+        track.enabled = next
+      })
+      if (callStateRef.current.conversationId) {
+        socketRef.current?.emit('call:camera', {
+          conversationId: callStateRef.current.conversationId,
+          enabled: next,
+        })
+      }
+      return
+    }
+    const next = !cameraEnabled
+    setCameraEnabled(next)
+    if (callStateRef.current.conversationId) {
+      socketRef.current?.emit('call:camera', {
+        conversationId: callStateRef.current.conversationId,
+        enabled: next,
+      })
+    }
+    if (next) {
+      await startLocalPreview()
+    } else {
+      stopLocalPreview()
+    }
   }
 
   const friendIdSet = useMemo(() => new Set(friends.map((item) => item.id)), [friends])
@@ -1362,6 +1593,21 @@ function App() {
     </section>
   )
 
+  const renderWaveform = (level: number) => (
+    <div className="mt-2 flex h-6 items-end gap-1">
+      {[0.4, 0.6, 0.9, 0.6, 0.4].map((multiplier, index) => (
+        <span
+          key={`wave-${index}`}
+          className="h-5 w-1 rounded-full bg-white/80 transition-transform duration-150"
+          style={{
+            transform: `scaleY(${0.3 + level * multiplier})`,
+            transformOrigin: 'bottom',
+          }}
+        />
+      ))}
+    </div>
+  )
+
   return (
     <div className="h-screen w-screen overflow-hidden">
       <div className="flex h-full flex-col md:flex-row">
@@ -1386,7 +1632,18 @@ function App() {
               </div>
               <div className="flex items-center gap-3">
                 <div>
-                  <h2 className="text-2xl font-semibold">Settings</h2>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="hidden md:inline-flex"
+                      onClick={() => setView('chat')}
+                      title="Back to chats"
+                    >
+                      <ArrowLeft size={18} />
+                    </Button>
+                    <h2 className="text-2xl font-semibold">Settings</h2>
+                  </div>
                   <p className="text-sm text-muted-foreground">
                     Update your preferences and account settings.
                   </p>
@@ -2356,8 +2613,18 @@ function App() {
       </Dialog>
 
       {callState.status !== 'idle' ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6">
-          <div className="w-full max-w-3xl space-y-4 rounded-2xl glass p-6">
+        <div
+          className={`fixed inset-0 z-50 p-6 ${
+            callMinimized
+              ? 'bg-transparent pointer-events-none'
+              : 'grid place-items-center bg-black/60'
+          }`}
+        >
+          <div
+            className={`fixed bottom-6 right-6 z-50 w-72 rounded-2xl glass p-4 shadow-xl transition ${
+              callMinimized ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+            }`}
+          >
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-semibold">{activeName}</p>
@@ -2369,61 +2636,303 @@ function App() {
                     : 'In call'}
                 </p>
               </div>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setCallMinimized(false)}
+                title="Maximize"
+              >
+                <Plus size={16} />
+              </Button>
+            </div>
+            <div className="relative mt-3 overflow-hidden rounded-xl">
+              {callState.mode === 'voice' ? (
+                <div className="flex h-36 w-full flex-col items-center justify-center rounded-xl bg-black/40">
+                  <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                    {activeAvatarSrc ? (
+                      <img
+                        src={activeAvatarSrc}
+                        alt={activeName}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <User size={20} className="text-white/80" />
+                    )}
+                  </div>
+                  {renderWaveform(remoteLevel)}
+                </div>
+              ) : (
+                <>
+                  <video
+                    ref={remoteMiniRef}
+                    autoPlay
+                    playsInline
+                    className={`h-36 w-full rounded-xl bg-black/70 ${
+                      remoteCameraOn ? '' : 'opacity-0'
+                    }`}
+                    onLoadedMetadata={(event) =>
+                      event.currentTarget.play().catch(() => {})
+                    }
+                    onPlaying={() => setRemoteVideoReady(true)}
+                    onPause={() => setRemoteVideoReady(false)}
+                    onEnded={() => setRemoteVideoReady(false)}
+                  />
+                  {!remoteVideoReady || !remoteCameraOn ? (
+                    <div className="absolute bg-black/40 flex flex-col h-full justify-center place-items-center rounded-xl top-0 w-full">
+                      <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                        {activeAvatarSrc ? (
+                          <img
+                            src={activeAvatarSrc}
+                            alt={activeName}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <User size={20} className="text-white/80" />
+                        )}
+                      </div>
+                      {!remoteCameraOn ? renderWaveform(remoteLevel) : null}
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              {callState.status === 'incoming' ? (
+                <>
+                  {callState.mode === 'video' ? (
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      onClick={toggleCamera}
+                      title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                    >
+                      {cameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+                    </Button>
+                  ) : null}
+                  <Button onClick={acceptCall} className="flex-1">
+                    Accept
+                  </Button>
+                  <Button variant="outline" onClick={endCall} className="flex-1">
+                    Decline
+                  </Button>
+                </>
+              ) : (
+                <>
+                  {callState.mode === 'video' ? (
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      onClick={toggleCamera}
+                      title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                    >
+                      {cameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+                    </Button>
+                  ) : null}
+                  <Button size="icon" variant="secondary" onClick={toggleMic} title="Mute mic">
+                    {micMuted ? <MicOff size={18} /> : <Mic size={18} />}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="secondary"
+                    onClick={toggleSpeaker}
+                    title="Mute speaker"
+                  >
+                    {speakerMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                  </Button>
+                  <Button
+                    size="icon"
+                    onClick={endCall}
+                    className="bg-red-500 text-white hover:bg-red-500/90"
+                    title="End call"
+                  >
+                    <PhoneOff size={18} />
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+          <div
+            className={`w-full max-w-3xl space-y-4 rounded-2xl glass p-6 transition ${
+              callMinimized ? 'pointer-events-none opacity-0' : 'opacity-100'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold">{activeName}</p>
+                <p className="text-xs text-muted-foreground">
+                  {callState.status === 'incoming'
+                    ? 'Incoming call'
+                    : callState.status === 'calling'
+                    ? 'Calling...'
+                    : 'In call'}
+                </p>
+              </div>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setCallMinimized(true)}
+                title="Minimize"
+              >
+                <Minus size={18} />
+              </Button>
             </div>
             <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
               <div className="relative">
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className="h-64 w-full rounded-xl bg-black/70"
-                  onLoadedMetadata={(event) => event.currentTarget.play().catch(() => {})}
-                />
-                <div className="absolute bottom-3 left-3 rounded-full bg-black/60 px-3 py-1 text-xs text-white">
-                  {activeName}
-                </div>
+                {callState.mode === 'voice' ? (
+                  <div className="flex h-64 w-full flex-col items-center justify-center rounded-xl bg-black/50">
+                    <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                      {activeAvatarSrc ? (
+                        <img
+                          src={activeAvatarSrc}
+                          alt={activeName}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <User size={28} className="text-white/80" />
+                      )}
+                    </div>
+                    {renderWaveform(remoteLevel)}
+                  </div>
+                ) : (
+                  <>
+                    <video
+                      ref={remoteVideoRef}
+                      autoPlay
+                      playsInline
+                      className={`h-64 w-full rounded-xl bg-black/70 ${
+                        remoteCameraOn ? '' : 'opacity-0'
+                      }`}
+                      onLoadedMetadata={(event) =>
+                        event.currentTarget.play().catch(() => {})
+                      }
+                      onPlaying={() => setRemoteVideoReady(true)}
+                      onPause={() => setRemoteVideoReady(false)}
+                      onEnded={() => setRemoteVideoReady(false)}
+                    />
+                    {!remoteVideoReady || !remoteCameraOn ? (
+                      <div className="absolute bg-black/40 flex flex-col h-full justify-center place-items-center rounded-xl top-0 w-full">
+                        <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                          {activeAvatarSrc ? (
+                            <img
+                              src={activeAvatarSrc}
+                              alt={activeName}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <User size={24} className="text-white/80" />
+                          )}
+                        </div>
+                        {!remoteCameraOn ? renderWaveform(remoteLevel) : null}
+                      </div>
+                    ) : null}
+                    <div className="absolute bottom-3 left-3 rounded-full bg-black/60 px-3 py-1 text-xs text-white">
+                      {activeName}
+                    </div>
+                  </>
+                )}
               </div>
               <div className="relative">
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="h-40 w-full rounded-xl bg-black/70"
-                  onLoadedMetadata={(event) => event.currentTarget.play().catch(() => {})}
-                />
-                <div className="absolute bottom-2 left-2 rounded-full bg-black/60 px-2 py-1 text-[10px] text-white">
-                  {user.displayName}
-                </div>
+                {callState.mode === 'voice' ? (
+                  <div className="flex h-40 w-full flex-col items-center justify-center rounded-xl bg-black/50">
+                    <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                      {user.avatarUrl ? (
+                        <img
+                          src={getAvatarSrc(user)}
+                          alt={user.displayName}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <User size={20} className="text-white/80" />
+                      )}
+                    </div>
+                    {renderWaveform(localLevel)}
+                  </div>
+                ) : cameraEnabled ? (
+                  <div className="relative h-40 w-full">
+                    <video
+                      ref={localVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="h-full w-full rounded-xl bg-black/70"
+                      onLoadedMetadata={(event) =>
+                        event.currentTarget.play().catch(() => {})
+                      }
+                    />
+                    <div className="absolute bottom-2 left-2 lg:bottom rounded-full bg-black/60 px-2 py-1 text-[10px] text-white">
+                      {user.displayName}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-40 w-full flex-col items-center justify-center rounded-xl bg-black/50">
+                    <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-white/10">
+                      {user.avatarUrl ? (
+                        <img
+                          src={getAvatarSrc(user)}
+                          alt={user.displayName}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <User size={20} className="text-white/80" />
+                      )}
+                    </div>
+                    <p className="mt-2 text-xs text-white/70">Camera off</p>
+                  </div>
+                )}
               </div>
             </div>
-            {callState.status === 'incoming' ? (
-              <div className="flex gap-3">
-                <Button onClick={acceptCall}>Accept</Button>
-                <Button variant="outline" onClick={endCall}>
-                  Decline
-                </Button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-3">
-                <Button size="icon" variant="secondary" onClick={toggleMic} title="Mute mic">
-                  {micMuted ? <MicOff size={18} /> : <Mic size={18} />}
-                </Button>
-                <Button size="icon" variant="secondary" onClick={toggleSpeaker} title="Mute speaker">
-                  {speakerMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-                </Button>
-                <Button
-                  size="icon"
-                  onClick={endCall}
-                  className="bg-red-500 text-white hover:bg-red-500/90"
-                  title="End call"
-                >
-                  <PhoneOff size={18} />
-                </Button>
-              </div>
-            )}
+              {callState.status === 'incoming' ? (
+                <div className="flex gap-3">
+                  {callState.mode === 'video' ? (
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      onClick={toggleCamera}
+                      title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                    >
+                      {cameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+                    </Button>
+                  ) : null}
+                  <Button onClick={acceptCall}>Accept</Button>
+                  <Button variant="outline" onClick={endCall}>
+                    Decline
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  {callState.mode === 'video' ? (
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      onClick={toggleCamera}
+                      title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                    >
+                      {cameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+                    </Button>
+                  ) : null}
+                  <Button size="icon" variant="secondary" onClick={toggleMic} title="Mute mic">
+                    {micMuted ? <MicOff size={18} /> : <Mic size={18} />}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="secondary"
+                    onClick={toggleSpeaker}
+                    title="Mute speaker"
+                  >
+                    {speakerMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                  </Button>
+                  <Button
+                    size="icon"
+                    onClick={endCall}
+                    className="bg-red-500 text-white hover:bg-red-500/90"
+                    title="End call"
+                  >
+                    <PhoneOff size={18} />
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
       ) : null}
     </div>
   )

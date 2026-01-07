@@ -17,13 +17,13 @@ import {
 } from './config.js'
 import { pool } from './db.js'
 
+const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 const app = express()
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
   cors: { origin: clientOrigin },
 })
 const upload = multer({ dest: uploadsDir })
-const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 
 app.use(cors({ origin: clientOrigin }))
 app.use(express.json())
@@ -168,6 +168,15 @@ io.on('connection', async (socket) => {
   socket.on('call:ice', async (payload) => {
     if (await isMember(payload.conversationId, userId)) {
       socket.to(payload.conversationId).emit('call:ice', {
+        ...payload,
+        from: userId,
+      })
+    }
+  })
+
+  socket.on('call:camera', async (payload) => {
+    if (await isMember(payload.conversationId, userId)) {
+      socket.to(payload.conversationId).emit('call:camera', {
         ...payload,
         from: userId,
       })
