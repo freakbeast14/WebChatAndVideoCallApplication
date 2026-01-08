@@ -15,9 +15,11 @@ import {
   retentionMs,
   tokenExpiresIn,
   uploadsDir,
+  useSupabaseStorage,
 } from './config.js'
 import { pool } from './db.js'
 import { sendPasswordResetEmail, sendVerificationEmail } from './email.js'
+import { deleteFromStorage, getSignedUrl, uploadToStorage } from './storage.js'
 
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 const app = express()
@@ -55,12 +57,22 @@ const purgeExpired = async () => {
     'SELECT id, filename FROM files WHERE expires_at <= $1',
     [now]
   )
-  for (const file of expiredFiles.rows) {
-    const filePath = path.join(uploadsDir, file.filename)
+  if (useSupabaseStorage) {
+    const keys = expiredFiles.rows.map((file) => file.filename).filter(Boolean)
     try {
-      await fs.unlink(filePath)
+      await deleteFromStorage(keys)
     } catch {
-      // Ignore missing files during cleanup.
+      // Ignore storage cleanup failures.
+    }
+  }
+  for (const file of expiredFiles.rows) {
+    if (!useSupabaseStorage) {
+      const filePath = path.join(uploadsDir, file.filename)
+      try {
+        await fs.unlink(filePath)
+      } catch {
+        // Ignore missing files during cleanup.
+      }
     }
   }
   if (expiredFiles.rows.length > 0) {
@@ -413,6 +425,14 @@ app.get('/api/users/avatar/:id', async (req, res) => {
   if (!avatar) {
     return res.status(404).json({ error: 'Avatar not found' })
   }
+  if (useSupabaseStorage) {
+    try {
+      const url = await getSignedUrl(avatar, 600)
+      return res.redirect(url)
+    } catch {
+      return res.status(404).json({ error: 'Avatar not found' })
+    }
+  }
   const filePath = path.join(uploadsDir, avatar)
   return res.sendFile(filePath)
 })
@@ -426,17 +446,34 @@ app.post('/api/users/avatar', auth, upload.single('avatar'), async (req, res) =>
   ])
   const previous = current.rows[0]?.avatar_url
   const ext = path.extname(req.file.originalname) || '.png'
-  const filename = `avatar-${req.userId}-${Date.now()}${ext}`
-  await fs.rename(req.file.path, path.join(uploadsDir, filename))
+  const filename = `avatars/avatar-${req.userId}-${Date.now()}${ext}`
+  if (useSupabaseStorage) {
+    await uploadToStorage({
+      filePath: req.file.path,
+      key: filename,
+      contentType: req.file.mimetype,
+    })
+    await fs.unlink(req.file.path)
+  } else {
+    await fs.rename(req.file.path, path.join(uploadsDir, filename))
+  }
   await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [
     filename,
     req.userId,
   ])
   if (previous) {
-    try {
-      await fs.unlink(path.join(uploadsDir, previous))
-    } catch {
-      // Ignore missing old avatar.
+    if (useSupabaseStorage) {
+      try {
+        await deleteFromStorage([previous])
+      } catch {
+        // Ignore missing old avatar.
+      }
+    } else {
+      try {
+        await fs.unlink(path.join(uploadsDir, previous))
+      } catch {
+        // Ignore missing old avatar.
+      }
     }
   }
   const result = await pool.query('SELECT * FROM users WHERE id = $1', [
@@ -894,6 +931,17 @@ app.post(
     if (!req.file) {
       return res.status(400).json({ error: 'Missing file' })
     }
+    const storageKey = useSupabaseStorage
+      ? `files/${conversationId}/${Date.now()}-${req.file.originalname}`
+      : req.file.filename
+    if (useSupabaseStorage) {
+      await uploadToStorage({
+        filePath: req.file.path,
+        key: storageKey,
+        contentType: req.file.mimetype,
+      })
+      await fs.unlink(req.file.path)
+    }
     const fileResult = await pool.query(
       `INSERT INTO files
        (conversation_id, uploaded_by, original_name, filename, mime_type, size, expires_at)
@@ -903,7 +951,7 @@ app.post(
         conversationId,
         req.userId,
         req.file.originalname,
-        req.file.filename,
+        storageKey,
         req.file.mimetype,
         req.file.size,
         retentionDays,
@@ -937,6 +985,14 @@ app.get('/api/files/:id', auth, async (req, res) => {
   }
   if (!(await isMember(file.conversation_id, req.userId))) {
     return res.status(403).json({ error: 'Forbidden' })
+  }
+  if (useSupabaseStorage) {
+    try {
+      const url = await getSignedUrl(file.filename, 600)
+      return res.redirect(url)
+    } catch {
+      return res.status(404).json({ error: 'File not found' })
+    }
   }
   const filePath = path.join(uploadsDir, file.filename)
   return res.sendFile(filePath)
