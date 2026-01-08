@@ -50,6 +50,8 @@ const sanitizeUser = (user) => ({
 const issueToken = (userId) =>
   jwt.sign({ userId }, jwtSecret, { expiresIn: tokenExpiresIn })
 
+const requireEmailVerification = process.env.REQUIRE_EMAIL_VERIFICATION === 'true'
+
 const purgeExpired = async () => {
   const now = new Date()
   const cutoff = new Date(Date.now() - retentionMs)
@@ -232,8 +234,12 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(409).json({ error: 'Email already registered' })
   }
   const passwordHash = await bcrypt.hash(password, 10)
-  const verificationToken = crypto.randomBytes(32).toString('hex')
-  const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000)
+  const verificationToken = requireEmailVerification
+    ? crypto.randomBytes(32).toString('hex')
+    : null
+  const verificationExpires = requireEmailVerification
+    ? new Date(Date.now() + 24 * 60 * 60 * 1000)
+    : null
   const result = await pool.query(
     `INSERT INTO users (email, display_name, password_hash, email_verified, verification_token, verification_expires)
      VALUES ($1, $2, $3, $4, $5, $6)
@@ -242,21 +248,23 @@ app.post('/api/auth/register', async (req, res) => {
       email.toLowerCase(),
       displayName,
       passwordHash,
-      false,
+      requireEmailVerification ? false : true,
       verificationToken,
       verificationExpires,
     ]
   )
   const user = result.rows[0]
-  try {
-    await sendVerificationEmail({
-      to: user.email,
-      displayName: user.display_name,
-      token: verificationToken,
-    })
-  } catch (error) {
-    console.error('Verification email failed:', error)
-    return res.status(500).json({ error: 'Failed to send verification email' })
+  if (requireEmailVerification) {
+    try {
+      await sendVerificationEmail({
+        to: user.email,
+        displayName: user.display_name,
+        token: verificationToken,
+      })
+    } catch (error) {
+      console.error('Verification email failed:', error)
+      return res.status(500).json({ error: 'Failed to send verification email' })
+    }
   }
   return res.json({ token: issueToken(user.id), user: sanitizeUser(user) })
 })
@@ -270,7 +278,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user) {
     return res.status(401).json({ error: 'Invalid credentials' })
   }
-  if (!user.email_verified) {
+  if (requireEmailVerification && !user.email_verified) {
     return res.status(403).json({ error: 'Email not verified' })
   }
   const ok = await bcrypt.compare(password ?? '', user.password_hash)
@@ -411,7 +419,7 @@ app.get('/api/users/me', auth, async (req, res) => {
   if (!user) {
     return res.status(404).json({ error: 'User not found' })
   }
-  if (!user.email_verified) {
+  if (requireEmailVerification && !user.email_verified) {
     return res.status(403).json({ error: 'Email not verified' })
   }
   return res.json({ user: sanitizeUser(user) })
