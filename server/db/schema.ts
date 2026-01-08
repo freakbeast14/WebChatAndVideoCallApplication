@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import {
+  boolean,
   integer,
   pgTable,
   text,
@@ -14,6 +15,11 @@ export const users = pgTable('users', {
   displayName: text('display_name').notNull(),
   avatarUrl: text('avatar_url').notNull().default(''),
   passwordHash: text('password_hash').notNull(),
+  emailVerified: boolean('email_verified').notNull().default(false),
+  verificationToken: text('verification_token'),
+  verificationExpires: timestamp('verification_expires', { withTimezone: true }),
+  resetToken: text('reset_token'),
+  resetExpires: timestamp('reset_expires', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),

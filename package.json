@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "node server/index.js",
-    "db:push": "node server/scripts/db-bootstrap.js && drizzle-kit push",
+    "db:push": "node server/scripts/db-bootstrap.js && drizzle-kit push && node server/scripts/db-backfill.js",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
@@ -20,6 +20,7 @@
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.540.0",
     "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.14",
     "pg": "^8.16.3",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

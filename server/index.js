@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import express from 'express'
+import crypto from 'crypto'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
@@ -16,6 +17,7 @@ import {
   uploadsDir,
 } from './config.js'
 import { pool } from './db.js'
+import { sendPasswordResetEmail, sendVerificationEmail } from './email.js'
 
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 const app = express()
@@ -39,6 +41,7 @@ const sanitizeUser = (user) => ({
   email: user.email,
   displayName: user.display_name,
   avatarUrl: user.avatar_url,
+  emailVerified: user.email_verified,
   createdAt: user.created_at,
 })
 
@@ -203,6 +206,13 @@ app.post('/api/auth/register', async (req, res) => {
   if (!email || !password || !displayName) {
     return res.status(400).json({ error: 'Missing fields' })
   }
+  const passwordRule = /^(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$/
+  if (!passwordRule.test(password)) {
+    return res.status(400).json({
+      error:
+        'Password must be 8+ characters with at least 1 number and 1 special character',
+    })
+  }
   const existing = await pool.query('SELECT 1 FROM users WHERE email = $1', [
     email.toLowerCase(),
   ])
@@ -210,13 +220,32 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(409).json({ error: 'Email already registered' })
   }
   const passwordHash = await bcrypt.hash(password, 10)
+  const verificationToken = crypto.randomBytes(32).toString('hex')
+  const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000)
   const result = await pool.query(
-    `INSERT INTO users (email, display_name, password_hash)
-     VALUES ($1, $2, $3)
+    `INSERT INTO users (email, display_name, password_hash, email_verified, verification_token, verification_expires)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
-    [email.toLowerCase(), displayName, passwordHash]
+    [
+      email.toLowerCase(),
+      displayName,
+      passwordHash,
+      false,
+      verificationToken,
+      verificationExpires,
+    ]
   )
   const user = result.rows[0]
+  try {
+    await sendVerificationEmail({
+      to: user.email,
+      displayName: user.display_name,
+      token: verificationToken,
+    })
+  } catch (error) {
+    console.error('Verification email failed:', error)
+    return res.status(500).json({ error: 'Failed to send verification email' })
+  }
   return res.json({ token: issueToken(user.id), user: sanitizeUser(user) })
 })
 
@@ -229,11 +258,137 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user) {
     return res.status(401).json({ error: 'Invalid credentials' })
   }
+  if (!user.email_verified) {
+    return res.status(403).json({ error: 'Email not verified' })
+  }
   const ok = await bcrypt.compare(password ?? '', user.password_hash)
   if (!ok) {
     return res.status(401).json({ error: 'Invalid credentials' })
   }
   return res.json({ token: issueToken(user.id), user: sanitizeUser(user) })
+})
+
+app.post('/api/auth/forgot', async (req, res) => {
+  const { email } = req.body ?? {}
+  if (!email) {
+    return res.status(400).json({ error: 'Missing email' })
+  }
+  const result = await pool.query('SELECT * FROM users WHERE email = $1', [
+    email.toLowerCase(),
+  ])
+  const user = result.rows[0]
+  if (!user) {
+    return res.json({ ok: true })
+  }
+  const resetToken = crypto.randomBytes(32).toString('hex')
+  const resetExpires = new Date(Date.now() + 30 * 60 * 1000)
+  await pool.query(
+    `UPDATE users
+     SET reset_token = $1, reset_expires = $2
+     WHERE id = $3`,
+    [resetToken, resetExpires, user.id]
+  )
+  await sendPasswordResetEmail({
+    to: user.email,
+    displayName: user.display_name,
+    token: resetToken,
+  })
+  return res.json({ ok: true })
+})
+
+app.post('/api/auth/reset', async (req, res) => {
+  const { token, password } = req.body ?? {}
+  if (!token || !password) {
+    return res.status(400).json({ error: 'Missing reset data' })
+  }
+  const passwordRule = /^(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$/
+  if (!passwordRule.test(password)) {
+    return res.status(400).json({
+      error:
+        'Password must be 8+ characters with at least 1 number and 1 special character',
+    })
+  }
+  const result = await pool.query(
+    `SELECT * FROM users
+     WHERE reset_token = $1 AND reset_expires > now()`,
+    [token]
+  )
+  const user = result.rows[0]
+  if (!user) {
+    return res.status(400).json({ error: 'Reset link is invalid or expired' })
+  }
+  const passwordHash = await bcrypt.hash(password, 10)
+  await pool.query(
+    `UPDATE users
+     SET password_hash = $1, reset_token = NULL, reset_expires = NULL
+     WHERE id = $2`,
+    [passwordHash, user.id]
+  )
+  return res.json({ ok: true })
+})
+
+app.get('/api/auth/reset', async (req, res) => {
+  const token = String(req.query.token || '')
+  const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+  if (!token) {
+    return res.redirect(`${clientOrigin}/?reset=error`)
+  }
+  return res.redirect(`${clientOrigin}/?reset=${encodeURIComponent(token)}`)
+})
+
+app.get('/api/auth/verify', async (req, res) => {
+  const token = String(req.query.token || '')
+  const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+  if (!token) {
+    return res.redirect(`${clientOrigin}/?verified=error`)
+  }
+  const result = await pool.query(
+    `SELECT * FROM users
+     WHERE verification_token = $1 AND verification_expires > now()`,
+    [token]
+  )
+  const user = result.rows[0]
+  if (!user) {
+    return res.redirect(`${clientOrigin}/?verified=error`)
+  }
+  await pool.query(
+    `UPDATE users
+     SET email_verified = true, verification_token = NULL, verification_expires = NULL
+     WHERE id = $1`,
+    [user.id]
+  )
+  return res.redirect(`${clientOrigin}/?verified=success`)
+})
+
+app.post('/api/auth/verify/resend', async (req, res) => {
+  const { email } = req.body ?? {}
+  if (!email) {
+    return res.status(400).json({ error: 'Missing email' })
+  }
+  const result = await pool.query('SELECT * FROM users WHERE email = $1', [
+    email.toLowerCase(),
+  ])
+  const user = result.rows[0]
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+  if (user.email_verified) {
+    return res.json({ ok: true })
+  }
+  const verificationToken = crypto.randomBytes(32).toString('hex')
+  const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000)
+  await pool.query(
+    `UPDATE users
+     SET verification_token = $1, verification_expires = $2
+     WHERE id = $3`,
+    [verificationToken, verificationExpires, user.id]
+  )
+  await sendVerificationEmail({
+    to: user.email,
+    displayName: user.display_name,
+    token: verificationToken,
+  })
+  return res.json({ ok: true })
 })
 
 app.get('/api/users/me', auth, async (req, res) => {
@@ -243,6 +398,9 @@ app.get('/api/users/me', auth, async (req, res) => {
   const user = result.rows[0]
   if (!user) {
     return res.status(404).json({ error: 'User not found' })
+  }
+  if (!user.email_verified) {
+    return res.status(403).json({ error: 'Email not verified' })
   }
   return res.json({ user: sanitizeUser(user) })
 })
