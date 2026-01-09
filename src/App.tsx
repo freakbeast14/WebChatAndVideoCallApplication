@@ -48,6 +48,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
 const FORCE_TURN_RELAY = import.meta.env.VITE_TURN_FORCE_RELAY === 'true'
+const LOW_BANDWIDTH_CALLS = import.meta.env.VITE_LOW_BANDWIDTH_CALLS === 'true'
+const CALL_WIDTH = Number(import.meta.env.VITE_CALL_WIDTH || 640)
+const CALL_HEIGHT = Number(import.meta.env.VITE_CALL_HEIGHT || 360)
+const CALL_FPS = Number(import.meta.env.VITE_CALL_FPS || 15)
+const CALL_MAX_BITRATE = Number(import.meta.env.VITE_CALL_MAX_BITRATE || 300000)
 
 const getToken = () => localStorage.getItem('chatapp_token') || ''
 const setToken = (value: string) => localStorage.setItem('chatapp_token', value)
@@ -1426,7 +1431,16 @@ function App() {
     }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: true,
-      video: mode === 'video',
+      video:
+        mode === 'video'
+          ? LOW_BANDWIDTH_CALLS
+            ? {
+                width: { ideal: CALL_WIDTH },
+                height: { ideal: CALL_HEIGHT },
+                frameRate: { ideal: CALL_FPS, max: CALL_FPS },
+              }
+            : true
+          : false,
     })
     localStreamRef.current = stream
     setLocalStream(stream)
@@ -1436,6 +1450,17 @@ function App() {
       })
     }
     stream.getTracks().forEach((track) => peer.addTrack(track, stream))
+    if (LOW_BANDWIDTH_CALLS && mode === 'video') {
+      const sender = peer
+        .getSenders()
+        .find((item) => item.track && item.track.kind === 'video')
+      if (sender) {
+        const params = sender.getParameters()
+        params.encodings = params.encodings || [{}]
+        params.encodings[0].maxBitrate = CALL_MAX_BITRATE
+        sender.setParameters(params).catch(() => {})
+      }
+    }
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream
     }
