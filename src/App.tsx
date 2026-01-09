@@ -228,6 +228,7 @@ function App() {
   const activeIdRef = useRef<string | null>(null)
   const userRef = useRef<User | null>(null)
   const iceServersRef = useRef<RTCIceServer[]>([])
+  const pendingIceRef = useRef<Record<string, RTCIceCandidateInit[]>>({})
 
   const authHeader = useMemo(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -515,9 +516,15 @@ function App() {
     })
 
     socket.on('call:ice', async (payload) => {
-      if (!callStateRef.current.conversationId) return
+      if (!payload?.conversationId || !payload.candidate) return
+      if (!callStateRef.current.conversationId) {
+        pendingIceRef.current[payload.conversationId] =
+          pendingIceRef.current[payload.conversationId] || []
+        pendingIceRef.current[payload.conversationId].push(payload.candidate)
+        return
+      }
       if (payload.conversationId !== callStateRef.current.conversationId) return
-      if (peerRef.current && payload.candidate) {
+      if (peerRef.current) {
         try {
           await peerRef.current.addIceCandidate(payload.candidate)
         } catch {
@@ -1414,6 +1421,17 @@ function App() {
     stream.getTracks().forEach((track) => peer.addTrack(track, stream))
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream
+    }
+    const pending = pendingIceRef.current[conversationId]
+    if (pending?.length) {
+      pending.forEach(async (candidate) => {
+        try {
+          await peer.addIceCandidate(candidate)
+        } catch {
+          // Ignore invalid ICE during teardown.
+        }
+      })
+      delete pendingIceRef.current[conversationId]
     }
     return peer
   }
