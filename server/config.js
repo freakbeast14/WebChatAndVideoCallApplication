@@ -16,3 +16,7 @@ export const useSupabaseStorage =
 export const supabaseUrl = process.env.SUPABASE_URL || ''
 export const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 export const supabaseBucket = process.env.SUPABASE_BUCKET || 'chatapp-files'
+export const turnApiUrl =
+  process.env.TURN_API_URL ||
+  'https://chatappturn.metered.live/api/v1/turn/credentials'
+export const turnApiKey = process.env.TURN_API_KEY || ''

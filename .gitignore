@@ -14,6 +14,7 @@ dist-ssr
 .env
 server/data
 server/uploads
+Oracle_OCI
 
 # Editor directories and files
 .vscode/*

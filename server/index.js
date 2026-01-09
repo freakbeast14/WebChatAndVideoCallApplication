@@ -16,6 +16,8 @@ import {
   tokenExpiresIn,
   uploadsDir,
   useSupabaseStorage,
+  turnApiKey,
+  turnApiUrl,
 } from './config.js'
 import { pool } from './db.js'
 import { sendPasswordResetEmail, sendVerificationEmail } from './email.js'
@@ -286,6 +288,27 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid credentials' })
   }
   return res.json({ token: issueToken(user.id), user: sanitizeUser(user) })
+})
+
+app.get('/api/turn', async (_req, res) => {
+  if (!turnApiKey) {
+    return res.json({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    })
+  }
+  try {
+    const response = await fetch(`${turnApiUrl}?apiKey=${turnApiKey}`)
+    if (!response.ok) {
+      throw new Error('TURN API failed')
+    }
+    const iceServers = await response.json()
+    return res.json({ iceServers })
+  } catch (error) {
+    console.error('TURN API error:', error)
+    return res.json({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    })
+  }
 })
 
 app.post('/api/auth/forgot', async (req, res) => {

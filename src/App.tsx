@@ -226,6 +226,7 @@ function App() {
   const chatSearchRef = useRef<HTMLDivElement | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const userRef = useRef<User | null>(null)
+  const iceServersRef = useRef<RTCIceServer[] | null>(null)
 
   const authHeader = useMemo(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -1370,8 +1371,18 @@ function App() {
   }
 
   const setupPeerConnection = async (conversationId: string, mode: 'video' | 'voice') => {
+    if (!iceServersRef.current) {
+      try {
+        const response = await fetchJson('/api/turn')
+        iceServersRef.current = response.iceServers || [
+          { urls: 'stun:stun.l.google.com:19302' },
+        ]
+      } catch {
+        iceServersRef.current = [{ urls: 'stun:stun.l.google.com:19302' }]
+      }
+    }
     const peer = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: iceServersRef.current,
     })
     peerRef.current = peer
     peer.onicecandidate = (event) => {
