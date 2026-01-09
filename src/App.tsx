@@ -229,6 +229,18 @@ function App() {
   const userRef = useRef<User | null>(null)
   const iceServersRef = useRef<RTCIceServer[]>([])
   const pendingIceRef = useRef<Record<string, RTCIceCandidateInit[]>>({})
+  const flushPendingIce = async (conversationId: string, peer: RTCPeerConnection) => {
+    const pending = pendingIceRef.current[conversationId]
+    if (!pending?.length) return
+    for (const candidate of pending) {
+      try {
+        await peer.addIceCandidate(candidate)
+      } catch {
+        // Ignore invalid ICE during teardown.
+      }
+    }
+    delete pendingIceRef.current[conversationId]
+  }
 
   const authHeader = useMemo(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -505,6 +517,7 @@ function App() {
       if (payload.conversationId !== callStateRef.current.conversationId) return
       if (peerRef.current && payload.sdp) {
         await peerRef.current.setRemoteDescription(payload.sdp)
+        await flushPendingIce(payload.conversationId, peerRef.current)
         setCallState((prev) => ({ ...prev, status: 'in-call' }))
       }
     })
@@ -524,7 +537,7 @@ function App() {
         return
       }
       if (payload.conversationId !== callStateRef.current.conversationId) return
-      if (!peerRef.current) {
+      if (!peerRef.current || !peerRef.current.remoteDescription) {
         pendingIceRef.current[payload.conversationId] =
           pendingIceRef.current[payload.conversationId] || []
         pendingIceRef.current[payload.conversationId].push(payload.candidate)
@@ -1426,17 +1439,7 @@ function App() {
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream
     }
-    const pending = pendingIceRef.current[conversationId]
-    if (pending?.length) {
-      pending.forEach(async (candidate) => {
-        try {
-          await peer.addIceCandidate(candidate)
-        } catch {
-          // Ignore invalid ICE during teardown.
-        }
-      })
-      delete pendingIceRef.current[conversationId]
-    }
+    await flushPendingIce(conversationId, peer)
     return peer
   }
 
@@ -1471,6 +1474,7 @@ function App() {
     setRemoteVideoReady(false)
     const peer = await setupPeerConnection(callState.conversationId, callState.mode)
     await peer.setRemoteDescription(callState.offer)
+    await flushPendingIce(callState.conversationId, peer)
     const answer = await peer.createAnswer()
     await peer.setLocalDescription(answer)
     socketRef.current?.emit('call:answer', {
