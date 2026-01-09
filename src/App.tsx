@@ -1439,7 +1439,6 @@ function App() {
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream
     }
-    await flushPendingIce(conversationId, peer)
     return peer
   }
 
