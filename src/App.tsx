@@ -524,12 +524,16 @@ function App() {
         return
       }
       if (payload.conversationId !== callStateRef.current.conversationId) return
-      if (peerRef.current) {
-        try {
-          await peerRef.current.addIceCandidate(payload.candidate)
-        } catch {
-          // Ignore invalid ICE during teardown.
-        }
+      if (!peerRef.current) {
+        pendingIceRef.current[payload.conversationId] =
+          pendingIceRef.current[payload.conversationId] || []
+        pendingIceRef.current[payload.conversationId].push(payload.candidate)
+        return
+      }
+      try {
+        await peerRef.current.addIceCandidate(payload.candidate)
+      } catch {
+        // Ignore invalid ICE during teardown.
       }
     })
 
