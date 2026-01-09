@@ -226,7 +226,7 @@ function App() {
   const chatSearchRef = useRef<HTMLDivElement | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const userRef = useRef<User | null>(null)
-  const iceServersRef = useRef<RTCIceServer[] | null>(null)
+  const iceServersRef = useRef<RTCIceServer[]>([])
 
   const authHeader = useMemo(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -1371,12 +1371,11 @@ function App() {
   }
 
   const setupPeerConnection = async (conversationId: string, mode: 'video' | 'voice') => {
-    if (!iceServersRef.current) {
+    if (iceServersRef.current.length === 0) {
       try {
         const response = await fetchJson('/api/turn')
-        iceServersRef.current = response.iceServers || [
-          { urls: 'stun:stun.l.google.com:19302' },
-        ]
+        iceServersRef.current =
+          response.iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]
       } catch {
         iceServersRef.current = [{ urls: 'stun:stun.l.google.com:19302' }]
       }
