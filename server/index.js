@@ -936,6 +936,9 @@ app.get('/api/conversations/:id/messages', auth, async (req, res) => {
     senderId: row.sender_id,
     type: row.type,
     text: row.text,
+    replyTo: row.reply_to,
+    editedAt: row.edited_at,
+    deletedAt: row.deleted_at,
     createdAt: row.created_at,
     readBy: row.read_by ?? [],
     readAt: row.read_at ?? null,
@@ -952,6 +955,46 @@ app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   }))
   return res.json({ messages })
 })
+
+const getMessagePayload = async (messageId) => {
+  const result = await pool.query(
+    `SELECT m.*, f.id as file_id, f.original_name, f.filename, f.mime_type, f.size,
+            f.created_at as file_created_at,
+            array_remove(array_agg(mr.user_id), NULL) as read_by,
+            max(mr.read_at) as read_at
+     FROM messages m
+     LEFT JOIN files f ON f.id = m.file_id
+     LEFT JOIN message_reads mr ON mr.message_id = m.id
+     WHERE m.id = $1
+     GROUP BY m.id, f.id`,
+    [messageId]
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    senderId: row.sender_id,
+    type: row.type,
+    text: row.text,
+    replyTo: row.reply_to,
+    editedAt: row.edited_at,
+    deletedAt: row.deleted_at,
+    createdAt: row.created_at,
+    readBy: row.read_by ?? [],
+    readAt: row.read_at ?? null,
+    file: row.file_id
+      ? {
+          id: row.file_id,
+          originalName: row.original_name,
+          filename: row.filename,
+          mimeType: row.mime_type,
+          size: row.size,
+          createdAt: row.file_created_at,
+        }
+      : null,
+  }
+}
 
 app.post('/api/conversations/:id/read', auth, async (req, res) => {
   const conversationId = req.params.id
@@ -985,15 +1028,15 @@ app.post('/api/conversations/:id/messages', auth, async (req, res) => {
   if (!(await isMember(conversationId, req.userId))) {
     return res.status(404).json({ error: 'Conversation not found' })
   }
-  const { text } = req.body ?? {}
+  const { text, replyTo } = req.body ?? {}
   if (!text) {
     return res.status(400).json({ error: 'Missing text' })
   }
   const result = await pool.query(
-    `INSERT INTO messages (conversation_id, sender_id, type, text)
-     VALUES ($1, $2, 'text', $3)
+    `INSERT INTO messages (conversation_id, sender_id, type, text, reply_to)
+     VALUES ($1, $2, 'text', $3, $4)
      RETURNING *`,
-    [conversationId, req.userId, text]
+    [conversationId, req.userId, text, replyTo || null]
   )
   const message = result.rows[0]
   io.to(conversationId).emit('message:new', {
@@ -1043,11 +1086,12 @@ app.post(
       ]
     )
     const file = fileResult.rows[0]
+    const replyTo = req.body?.replyTo || null
     const messageResult = await pool.query(
-      `INSERT INTO messages (conversation_id, sender_id, type, file_id)
-       VALUES ($1, $2, 'file', $3)
+      `INSERT INTO messages (conversation_id, sender_id, type, file_id, reply_to)
+       VALUES ($1, $2, 'file', $3, $4)
        RETURNING *`,
-      [conversationId, req.userId, file.id]
+      [conversationId, req.userId, file.id, replyTo]
     )
     const message = { ...messageResult.rows[0], file }
     io.to(conversationId).emit('message:new', {
@@ -1081,6 +1125,69 @@ app.get('/api/files/:id', auth, async (req, res) => {
   }
   const filePath = path.join(uploadsDir, file.filename)
   return res.sendFile(filePath)
+})
+
+app.patch('/api/messages/:id', auth, async (req, res) => {
+  const messageId = req.params.id
+  const { text } = req.body ?? {}
+  if (!text) {
+    return res.status(400).json({ error: 'Missing text' })
+  }
+  const existing = await pool.query('SELECT * FROM messages WHERE id = $1', [
+    messageId,
+  ])
+  const message = existing.rows[0]
+  if (!message) {
+    return res.status(404).json({ error: 'Message not found' })
+  }
+  if (message.sender_id !== req.userId) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+  if (message.type !== 'text') {
+    return res.status(400).json({ error: 'Only text messages can be edited' })
+  }
+  if (message.deleted_at) {
+    return res.status(400).json({ error: 'Message deleted' })
+  }
+  await pool.query(
+    `UPDATE messages
+     SET text = $1, edited_at = now()
+     WHERE id = $2`,
+    [text, messageId]
+  )
+  const payload = await getMessagePayload(messageId)
+  if (payload) {
+    io.to(payload.conversationId).emit('message:update', payload)
+  }
+  return res.json({ message: payload })
+})
+
+app.delete('/api/messages/:id', auth, async (req, res) => {
+  const messageId = req.params.id
+  const existing = await pool.query('SELECT * FROM messages WHERE id = $1', [
+    messageId,
+  ])
+  const message = existing.rows[0]
+  if (!message) {
+    return res.status(404).json({ error: 'Message not found' })
+  }
+  if (message.sender_id !== req.userId) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+  if (message.deleted_at) {
+    return res.json({ ok: true })
+  }
+  await pool.query(
+    `UPDATE messages
+     SET deleted_at = now(), text = NULL, file_id = NULL, type = 'deleted', edited_at = NULL
+     WHERE id = $1`,
+    [messageId]
+  )
+  const payload = await getMessagePayload(messageId)
+  if (payload) {
+    io.to(payload.conversationId).emit('message:update', payload)
+  }
+  return res.json({ ok: true })
 })
 
 const start = async () => {

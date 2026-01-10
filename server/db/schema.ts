@@ -103,6 +103,9 @@ export const messages = pgTable('messages', {
   type: text('type').notNull(),
   text: text('text'),
   fileId: uuid('file_id').references(() => files.id, { onDelete: 'set null' }),
+  replyTo: uuid('reply_to').references(() => messages.id, { onDelete: 'set null' }),
+  editedAt: timestamp('edited_at', { withTimezone: true }),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),

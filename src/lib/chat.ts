@@ -8,6 +8,9 @@ export const mapMessage = (raw: any): Message => ({
   type: raw.type,
   text: raw.text ?? null,
   createdAt: raw.created_at ?? raw.createdAt,
+  editedAt: raw.edited_at ?? raw.editedAt ?? null,
+  replyTo: raw.reply_to ?? raw.replyTo ?? null,
+  deletedAt: raw.deleted_at ?? raw.deletedAt ?? null,
   readAt: raw.read_at ?? raw.readAt ?? null,
   readBy: raw.read_by ?? raw.readBy ?? [],
   file: raw.file

@@ -11,6 +11,7 @@ import GroupDialog from '@/components/dialogs/GroupDialog'
 import GroupManageDialog from '@/components/dialogs/GroupManageDialog'
 import SettingsView from '@/components/settings/SettingsView'
 import AvatarCropDialog from '@/components/settings/AvatarCropDialog'
+import ConfirmDialog from '@/components/ui/confirm-dialog'
 import type { CallState, Conversation, FriendRequest, Message, User as ChatUser } from '@/types'
 import { API_BASE, fetchJson } from '@/lib/api'
 import { getAvatarSrc, mapMessage } from '@/lib/chat'
@@ -52,6 +53,8 @@ function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [messageText, setMessageText] = useState('')
+  const [replyToId, setReplyToId] = useState<string | null>(null)
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [chatSearch, setChatSearch] = useState('')
   const [friends, setFriends] = useState<ChatUser[]>([])
   const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([])
@@ -99,6 +102,11 @@ function App() {
   })
   const [remoteVideoReady, setRemoteVideoReady] = useState(false)
   const [callMinimized, setCallMinimized] = useState(false)
+  const [confirmState, setConfirmState] = useState<{
+    open: boolean
+    kind: 'delete-message' | 'sign-out' | null
+    messageId?: string | null
+  }>({ open: false, kind: null })
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [localLevel, setLocalLevel] = useState(0)
@@ -384,6 +392,29 @@ function App() {
       )
     })
 
+    socket.on('message:update', (payload) => {
+      const updated = mapMessage(payload)
+      setMessages((prev) =>
+        prev.map((message) => (message.id === updated.id ? updated : message))
+      )
+      setConversations((prev) =>
+        prev.map((chat) =>
+          chat.last_message?.id === updated.id
+            ? {
+                ...chat,
+                last_message: {
+                  id: updated.id,
+                  sender_id: updated.senderId,
+                  type: updated.type,
+                  text: updated.text,
+                  created_at: updated.createdAt,
+                },
+              }
+            : chat
+        )
+      )
+    })
+
     socket.on('conversation:refresh', () => {
       fetchConversations()
     })
@@ -533,6 +564,11 @@ function App() {
 
   useEffect(() => {
     setTypingUsers([])
+  }, [activeId])
+
+  useEffect(() => {
+    setReplyToId(null)
+    setEditingMessageId(null)
   }, [activeId])
 
   useEffect(() => {
@@ -1141,11 +1177,14 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
-  const uploadFile = async (file: File) => {
+  const uploadFile = async (file: File, replyTo?: string | null) => {
     if (!token || !activeId) return
     setUploadProgress(0)
     const form = new FormData()
     form.append('file', file)
+    if (replyTo) {
+      form.append('replyTo', replyTo)
+    }
     await new Promise<void>((resolve) => {
       const xhr = new XMLHttpRequest()
       xhr.open('POST', `${API_BASE}/api/conversations/${activeId}/files`)
@@ -1178,17 +1217,36 @@ function App() {
     if (!activeId || !token) return
     const text = messageText.trim()
     if (!text && !pendingFile) return
+    if (editingMessageId) {
+      if (!text) return
+      const data = await fetchJson(`/api/messages/${editingMessageId}`, {
+        method: 'PATCH',
+        headers: authHeader,
+        body: JSON.stringify({ text }),
+      })
+      const updated = mapMessage(data.message)
+      setMessages((prev) =>
+        prev.map((message) => (message.id === updated.id ? updated : message))
+      )
+      setMessageText('')
+      setEditingMessageId(null)
+      setReplyToId(null)
+      return
+    }
     setMessageText('')
     socketRef.current?.emit('typing:stop', { conversationId: activeId })
     if (pendingFile) {
-      await uploadFile(pendingFile)
+      await uploadFile(pendingFile, replyToId)
       clearPendingFile()
     }
-    if (!text) return
+    if (!text) {
+      setReplyToId(null)
+      return
+    }
     const data = await fetchJson(`/api/conversations/${activeId}/messages`, {
       method: 'POST',
       headers: authHeader,
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, replyTo: replyToId }),
     })
     const message = mapMessage(data.message)
     setMessages((prev) =>
@@ -1210,6 +1268,7 @@ function App() {
           : chat
       )
     )
+    setReplyToId(null)
   }
 
   const downloadFile = async (fileId: string, name: string) => {
@@ -1256,6 +1315,60 @@ function App() {
     setPendingFileIsImage(true)
     setPendingFilePreview(URL.createObjectURL(file))
     event.target.value = ''
+  }
+
+  const handleReplyMessage = (messageId: string) => {
+    setEditingMessageId(null)
+    setReplyToId(messageId)
+  }
+
+  const handleCancelReply = () => {
+    setReplyToId(null)
+  }
+
+  const handleEditMessage = (message: Message) => {
+    if (!message.text) return
+    setEditingMessageId(message.id)
+    setMessageText(message.text)
+    setReplyToId(message.replyTo ?? null)
+    if (pendingFile) {
+      clearPendingFile()
+    }
+  }
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null)
+    setMessageText('')
+    setReplyToId(null)
+  }
+
+  const handleDeleteMessage = async (messageId: string) => {
+    setConfirmState({ open: true, kind: 'delete-message', messageId })
+  }
+
+  const handleConfirmAction = async () => {
+    if (!confirmState.kind) return
+    if (confirmState.kind === 'delete-message' && confirmState.messageId) {
+      if (!token) return
+      await fetchJson(`/api/messages/${confirmState.messageId}`, {
+        method: 'DELETE',
+        headers: authHeader,
+      })
+    }
+    if (confirmState.kind === 'sign-out') {
+      clearToken()
+      setAuthToken('')
+      setUser(null)
+      setConversations([])
+      setMessages([])
+      setActiveId(null)
+      setView('chat')
+    }
+    setConfirmState({ open: false, kind: null, messageId: null })
+  }
+
+  const handleCloseConfirm = () => {
+    setConfirmState({ open: false, kind: null, messageId: null })
   }
 
   const fetchFilePreviewUrl = async (fileId: string) => {
@@ -1773,13 +1886,7 @@ function App() {
             profileDirty={profileDirty}
             passwordDirty={passwordDirty}
             onSignOut={() => {
-              clearToken()
-              setAuthToken('')
-              setUser(null)
-              setConversations([])
-              setMessages([])
-              setActiveId(null)
-              setView('chat')
+              setConfirmState({ open: true, kind: 'sign-out' })
             }}
           />
         ) : (
@@ -1841,6 +1948,13 @@ function App() {
               messageText={messageText}
               onMessageTextChange={handleTyping}
               onSendMessage={sendMessage}
+              replyToId={replyToId}
+              editingMessageId={editingMessageId}
+              onReplyMessage={handleReplyMessage}
+              onCancelReply={handleCancelReply}
+              onEditMessage={handleEditMessage}
+              onCancelEdit={handleCancelEdit}
+              onDeleteMessage={handleDeleteMessage}
               fileInputRef={fileInputRef}
               onFileChange={handleFileChange}
               imageInputRef={imageInputRef}
@@ -1970,6 +2084,25 @@ function App() {
         onClose={handleAvatarCropClose}
         onApply={handleAvatarCropApply}
         onReset={handleAvatarCropReset}
+      />
+      <ConfirmDialog
+        open={confirmState.open}
+        title={
+          confirmState.kind === 'delete-message'
+            ? 'Delete message?'
+            : 'Sign out?'
+        }
+        description={
+          confirmState.kind === 'delete-message'
+            ? 'This will remove the message for everyone in this chat.'
+            : 'You can sign back in anytime.'
+        }
+        confirmLabel={
+          confirmState.kind === 'delete-message' ? 'Delete' : 'Sign out'
+        }
+        confirmTone={confirmState.kind === 'delete-message' ? 'danger' : 'default'}
+        onConfirm={handleConfirmAction}
+        onClose={handleCloseConfirm}
       />
     </div>
   )

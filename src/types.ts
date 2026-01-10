@@ -26,6 +26,9 @@ export type Message = {
   type: string
   text: string | null
   createdAt: string
+  editedAt?: string | null
+  replyTo?: string | null
+  deletedAt?: string | null
   readAt: string | null
   readBy: string[]
   file: null | {

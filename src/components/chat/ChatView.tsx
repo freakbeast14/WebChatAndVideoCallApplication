@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, CSSProperties, ReactNode, RefObject } from 'react'
 import {
   ArrowLeft,
@@ -7,11 +7,14 @@ import {
   ChevronUp,
   Download,
   Paperclip,
+  Pencil,
   Phone,
   Plus,
+  Reply,
   RotateCw,
   Search,
   Send,
+  Trash2,
   User,
   Users,
   Video,
@@ -58,6 +61,13 @@ type ChatViewProps = {
   messageText: string
   onMessageTextChange: (value: string) => void
   onSendMessage: () => void
+  replyToId: string | null
+  editingMessageId: string | null
+  onReplyMessage: (messageId: string) => void
+  onCancelReply: () => void
+  onEditMessage: (message: Message) => void
+  onCancelEdit: () => void
+  onDeleteMessage: (messageId: string) => void
   fileInputRef: RefObject<HTMLInputElement | null>
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void
   imageInputRef: RefObject<HTMLInputElement | null>
@@ -98,6 +108,13 @@ const ChatView = ({
   messageText,
   onMessageTextChange,
   onSendMessage,
+  replyToId,
+  editingMessageId,
+  onReplyMessage,
+  onCancelReply,
+  onEditMessage,
+  onCancelEdit,
+  onDeleteMessage,
   fileInputRef,
   onFileChange,
   imageInputRef,
@@ -155,6 +172,51 @@ const ChatView = ({
     return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)
   }
 
+  const scrollToMessage = (messageId: string) => {
+    const target = messageRefs.current[messageId]
+    if (!target || !scrollRef.current) return
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setFlashMessageId(messageId)
+    window.setTimeout(() => {
+      setFlashMessageId((current) => (current === messageId ? null : current))
+    }, 900)
+  }
+
+  const renderReplyPreview = (message: Message, isMine: boolean) => {
+    if (!message.replyTo) return null
+    const original = messageLookup.get(message.replyTo)
+    const sender =
+      original &&
+      activeConversation?.members.find((member) => member.id === original.senderId)
+    const senderName =
+      original?.senderId === user.id ? 'You' : sender?.displayName || 'Member'
+    const isDeleted = !original || original.deletedAt || original.type === 'deleted'
+    const previewText = isDeleted
+      ? 'Message deleted'
+      : original?.text
+        ? original.text
+        : original?.file
+          ? original.file.originalName
+          : 'Attachment'
+    return (
+      <div
+        className={`mb-2 rounded-lg border-l-2 px-3 py-2 text-[11px] ${
+          isMine
+            ? 'border-white/30 bg-white/10 text-foreground/80'
+            : 'border-white/40 bg-white/10 text-white/80'
+        } ${original ? 'cursor-pointer hover:bg-white/15' : ''}`}
+        onClick={() => {
+          if (original) {
+            scrollToMessage(original.id)
+          }
+        }}
+      >
+        <p className="font-semibold">{senderName}</p>
+        <p className="line-clamp-2">{previewText}</p>
+      </div>
+    )
+  }
+
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [imageLightbox, setImageLightbox] = useState<{
     url: string
@@ -167,6 +229,7 @@ const ChatView = ({
   const panStartRef = useRef<{ x: number; y: number; originX: number; originY: number } | null>(null)
   const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({})
   const [truncatedMessages, setTruncatedMessages] = useState<Record<string, boolean>>({})
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null)
   const textRefs = useRef<Record<string, HTMLParagraphElement | null>>({})
   const clampStyle: CSSProperties = {
     display: '-webkit-box',
@@ -174,6 +237,21 @@ const ChatView = ({
     WebkitBoxOrient: 'vertical',
     overflow: 'hidden',
   }
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [atBottom, setAtBottom] = useState(true)
+
+  const messageLookup = useMemo(() => {
+    const map = new Map<string, Message>()
+    groupedMessages.forEach((group) => {
+      group.items.forEach((message) => map.set(message.id, message))
+    })
+    return map
+  }, [groupedMessages])
+
+  const replyMessage = replyToId ? messageLookup.get(replyToId) : null
+  const editingMessage = editingMessageId
+    ? messageLookup.get(editingMessageId)
+    : null
 
   const measureTruncation = () => {
     const next: Record<string, boolean> = {}
@@ -225,6 +303,31 @@ const ChatView = ({
     setImageRotation(0)
     setPanOffset({ x: 0, y: 0 })
   }, [imageLightbox?.fileId])
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    if (!scrollRef.current) return
+    scrollRef.current.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior,
+    })
+  }
+
+  useEffect(() => {
+    scrollToBottom('auto')
+  }, [activeConversation?.id])
+
+  useEffect(() => {
+    if (atBottom) {
+      scrollToBottom('auto')
+    }
+  }, [groupedMessages, atBottom])
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current
+    const distance = scrollHeight - scrollTop - clientHeight
+    setAtBottom(distance < 40)
+  }
 
   const handlePanStart = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
@@ -367,7 +470,11 @@ const ChatView = ({
       </div>
     </header>
 
-    <div className="flex-1 glass overflow-y-auto px-4 py-6 md:px-6">
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="relative flex-1 glass overflow-y-auto px-4 py-6 md:px-6"
+    >
       {!activeConversation ? (
         <div className="rounded-xl glass-soft p-4 text-sm text-muted-foreground">
           Select a conversation to start messaging.
@@ -392,6 +499,12 @@ const ChatView = ({
                 const showSenderName = isGroupChat && message.senderId !== user.id
                 const isExpanded = Boolean(expandedMessages[message.id])
                 const isTruncated = Boolean(truncatedMessages[message.id])
+                const isMine = message.senderId === user.id
+                const isDeleted = Boolean(message.deletedAt) || message.type === 'deleted'
+                const replyPreview = renderReplyPreview(message, isMine)
+                if (isDeleted) {
+                  return null
+                }
                 return (
                   <div
                     key={message.id}
@@ -417,7 +530,7 @@ const ChatView = ({
                             )}
                           </div>
                           <div
-                            className={`relative rounded-2xl rounded-bl-none px-4 py-3 text-sm shadow break-all ${
+                            className={`relative group rounded-2xl rounded-bl-none px-4 py-3 text-sm shadow break-all transition-shadow duration-700 ${
                               message.senderId === user.id
                                 ? 'glass-soft'
                                 : 'bg-slate-900/60 text-white'
@@ -427,14 +540,36 @@ const ChatView = ({
                                   ? 'ring-2 ring-yellow-300/80'
                                   : 'ring-1 ring-violet-300/70'
                                 : ''
+                            } ${
+                              flashMessageId === message.id
+                                ? 'shadow-[0_0_0_2px_rgba(250,204,21,0.65),0_0_18px_rgba(250,204,21,0.35)]'
+                                : ''
                             }`}
                           >
+                            <div className="absolute left-full top-1/2 -translate-y-1/2 translate-x-2 flex gap-1 opacity-100 transition group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={() => onReplyMessage(message.id)}
+                                className="rounded-full bg-black/50 p-1 text-white hover:bg-black/70"
+                                title="Reply"
+                              >
+                                <Reply size={12} />
+                              </button>
+                            </div>
                             {showSenderName ? (
                               <p className="mb-1 text-[11px] font-semibold text-white/80">
                                 {sender?.displayName || 'Member'}
                               </p>
                             ) : null}
-                            {message.text ? (
+                            {message.editedAt && !isDeleted ? (
+                              <div className="mb-1 absolute -top-6 left-0 text-right text-[10px] tracking-wide text-muted-foreground">
+                                Edited
+                              </div>
+                            ) : null}
+                            {replyPreview}
+                            {isDeleted ? (
+                              <p className="text-xs italic text-white/70">Message deleted</p>
+                            ) : message.text ? (
                               <p
                                 ref={(node) => {
                                   textRefs.current[message.id] = node
@@ -493,7 +628,7 @@ const ChatView = ({
                                 </button>
                               )
                             ) : null}
-                            {message.text && isTruncated ? (
+                            {message.text && !isDeleted && isTruncated ? (
                               <button
                                 type="button"
                                 className="mt-2 text-xs font-medium italic hover:underline"
@@ -507,7 +642,7 @@ const ChatView = ({
                                 {isExpanded ? '...See less' : '...See more'}
                               </button>
                             ) : null}
-                            {message.file && message.text ? (
+                            {!isDeleted && message.file && message.text ? (
                               isImageFile(message.file.originalName) ? (
                                 <button
                                   type="button"
@@ -600,20 +735,42 @@ const ChatView = ({
                         </div>
                       ) : (
                         <div className="flex">
-                          <div
-                            className={`rounded-2xl rounded-bl-none px-4 py-3 text-sm shadow break-all ${
-                              message.senderId === user.id
-                                ? 'glass-soft'
-                                : 'bg-slate-900/60 text-white'
-                            } ${
-                              chatSearchMatches.includes(message.id)
-                                ? isActiveMatch
-                                  ? 'ring-2 ring-yellow-300/80'
-                                  : 'ring-1 ring-violet-300/70'
-                                : ''
-                            }`}
-                          >
-                            {message.text ? (
+                        <div
+                          className={`relative group rounded-2xl rounded-bl-none px-4 py-3 text-sm shadow break-all transition-shadow duration-700 ${
+                            message.senderId === user.id
+                              ? 'glass-soft'
+                              : 'bg-slate-900/60 text-white'
+                          } ${
+                            chatSearchMatches.includes(message.id)
+                              ? isActiveMatch
+                                ? 'ring-2 ring-yellow-300/80'
+                                : 'ring-1 ring-violet-300/70'
+                              : ''
+                          } ${
+                            flashMessageId === message.id
+                              ? 'shadow-[0_0_0_2px_rgba(250,204,21,0.65),0_0_18px_rgba(250,204,21,0.35)]'
+                              : ''
+                          }`}
+                        >
+                            <div className="absolute left-full top-1/2 -translate-y-1/2 translate-x-2 flex gap-1 opacity-100 transition group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={() => onReplyMessage(message.id)}
+                                className="rounded-full bg-black/50 p-1 text-white hover:bg-black/70"
+                                title="Reply"
+                              >
+                                <Reply size={12} />
+                              </button>
+                            </div>
+                            {message.editedAt && !isDeleted ? (
+                              <div className="mb-1 absolute -top-6 left-0 text-right text-[10px] tracking-wide text-muted-foreground">
+                                Edited
+                              </div>
+                            ) : null}
+                            {replyPreview}
+                            {isDeleted ? (
+                              <p className="text-xs italic text-white/70">Message deleted</p>
+                            ) : message.text ? (
                               <p
                                 ref={(node) => {
                                   textRefs.current[message.id] = node
@@ -662,7 +819,7 @@ const ChatView = ({
                                 </button>
                               )
                             ) : null}
-                            {message.text && isTruncated ? (
+                            {message.text && !isDeleted && isTruncated ? (
                               <button
                                 type="button"
                                 className="mt-2 text-xs font-medium italic hover:underline"
@@ -676,7 +833,7 @@ const ChatView = ({
                                 {isExpanded ? '...See less' : '...See more'}
                               </button>
                             ) : null}
-                            {message.file && message.text ? (
+                            {!isDeleted && message.file && message.text ? (
                               isImageFile(message.file.originalName) ? (
                                 <div className="mt-2 overflow-hidden rounded-xl border border-white/10 bg-white/5">
                                   {imageUrls[message.file.id] ? (
@@ -730,15 +887,57 @@ const ChatView = ({
                     ) : (
                       <div className="flex justify-end">
                         <div
-                          className={`rounded-2xl rounded-br-none px-4 py-3 text-sm shadow glass-soft break-all ${
+                          className={`relative group rounded-2xl rounded-br-none px-4 py-3 text-sm shadow glass-soft break-all transition-shadow duration-700 ${
                             chatSearchMatches.includes(message.id)
                               ? isActiveMatch
                                 ? 'ring-2 ring-yellow-300/80'
                                 : 'ring-1 ring-violet-300/70'
                               : ''
+                          } ${
+                            flashMessageId === message.id
+                              ? 'shadow-[0_0_0_2px_rgba(250,204,21,0.65),0_0_18px_rgba(250,204,21,0.35)]'
+                              : ''
                           }`}
                         >
-                          {message.text ? (
+                          <div className="absolute right-full top-1/2 -translate-y-1/2 -translate-x-2 flex gap-1 opacity-100 transition group-hover:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() => onReplyMessage(message.id)}
+                              className="rounded-full bg-white/70 p-1 text-slate-900 hover:bg-white"
+                              title="Reply"
+                            >
+                              <Reply size={12} />
+                            </button>
+                            {!isDeleted && message.text ? (
+                              <button
+                                type="button"
+                                onClick={() => onEditMessage(message)}
+                                className="rounded-full bg-white/70 p-1 text-slate-900 hover:bg-white"
+                                title="Edit"
+                              >
+                                <Pencil size={12} />
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => onDeleteMessage(message.id)}
+                              className="rounded-full bg-white/70 p-1 text-slate-900 hover:bg-white"
+                              title="Delete"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                          {message.editedAt && !isDeleted ? (
+                            <div className="mb-1 absolute -top-6 right-0 text-right text-[10px] tracking-wide text-muted-foreground">
+                              Edited
+                            </div>
+                          ) : null}
+                          {replyPreview}
+                          {isDeleted ? (
+                            <p className="text-xs italic text-muted-foreground">
+                              Message deleted
+                            </p>
+                          ) : message.text ? (
                             <p
                               ref={(node) => {
                                 textRefs.current[message.id] = node
@@ -797,7 +996,7 @@ const ChatView = ({
                               </button>
                             )
                           ) : null}
-                          {message.text && isTruncated ? (
+                          {message.text && !isDeleted && isTruncated ? (
                             <button
                               type="button"
                               className="mt-2 text-xs font-medium italic hover:underline"
@@ -811,7 +1010,7 @@ const ChatView = ({
                               {isExpanded ? '...See less' : '...See more'}
                             </button>
                           ) : null}
-                          {message.file && message.text ? (
+                          {!isDeleted && message.file && message.text ? (
                             isImageFile(message.file.originalName) ? (
                               <button
                                 type="button"
@@ -918,9 +1117,54 @@ const ChatView = ({
           </span>
         </div>
       ) : null}
+      {!atBottom ? (
+        <button
+          type="button"
+          onClick={() => scrollToBottom('smooth')}
+          className="sticky bottom-6 ml-auto mt-4 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 text-white shadow-lg backdrop-blur hover:bg-black/70"
+          title="Jump to latest"
+        >
+          <ChevronDown size={18} />
+        </button>
+      ) : null}
     </div>
 
     <footer className="glass px-4 py-4 md:px-6">
+      {(replyMessage || editingMessage) && (
+        <div className="mb-3 rounded-xl border border-white/15 bg-white/10 p-3 text-xs text-foreground shadow-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold">
+                {editingMessage ? 'Editing message' : 'Replying to'}{' '}
+                {!editingMessage && (
+                  <span className="text-muted-foreground">
+                    {replyMessage?.senderId === user.id
+                      ? 'You'
+                      : activeConversation?.members.find(
+                          (member) => member.id === replyMessage?.senderId
+                        )?.displayName || 'Member'}
+                  </span>
+                )}
+              </p>
+              <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                {editingMessage
+                  ? editingMessage.text || 'Message'
+                  : replyMessage?.deletedAt || replyMessage?.type === 'deleted'
+                    ? 'Message deleted'
+                    : replyMessage?.text || replyMessage?.file?.originalName || 'Message'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={editingMessage ? onCancelEdit : onCancelReply}
+              className="rounded-full bg-black/60 p-1 text-white hover:bg-black/70"
+              title="Cancel"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        </div>
+      )}
       {pendingFileName ? (
         <div className="mb-3 flex items-center text-xs text-foreground">
           <div className="flex items-center gap-3 glass-soft p-2 rounded-lg">
@@ -962,7 +1206,7 @@ const ChatView = ({
             size="icon"
             variant="ghost"
             onClick={() => imageInputRef.current?.click()}
-            disabled={!activeConversation}
+            disabled={!activeConversation || Boolean(editingMessageId)}
             title="Attach image"
           >
             <Plus size={18} />
@@ -978,7 +1222,7 @@ const ChatView = ({
             size="icon"
             variant="ghost"
             onClick={() => fileInputRef.current?.click()}
-            disabled={!activeConversation}
+            disabled={!activeConversation || Boolean(editingMessageId)}
             title="Attach"
           >
             <Paperclip size={18} />
