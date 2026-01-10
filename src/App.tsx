@@ -79,7 +79,6 @@ function App() {
   const [onlineUsers, setOnlineUsers] = useState<Record<string, boolean>>({})
   const [typingUsers, setTypingUsers] = useState<string[]>([])
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
-  const [uploadFileName, setUploadFileName] = useState('')
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const [pendingFilePreview, setPendingFilePreview] = useState('')
   const [pendingFileName, setPendingFileName] = useState('')
@@ -1115,7 +1114,6 @@ function App() {
 
   const uploadFile = async (file: File) => {
     if (!token || !activeId) return
-    setUploadFileName(file.name)
     setUploadProgress(0)
     const form = new FormData()
     form.append('file', file)
@@ -1145,7 +1143,6 @@ function App() {
       xhr.send(form)
     })
     setUploadProgress(null)
-    setUploadFileName('')
   }
 
   const sendMessage = async () => {
