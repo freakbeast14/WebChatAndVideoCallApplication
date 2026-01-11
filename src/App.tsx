@@ -2,7 +2,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { io, type Socket } from 'socket.io-client'
-import AuthLanding from '@/components/auth/AuthLanding'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import AuthCard from '@/components/auth/AuthCard'
+import HomePage from '@/components/home/HomePage'
 import ChatList from '@/components/chat/ChatList'
 import ChatView from '@/components/chat/ChatView'
 import CallOverlay from '@/components/calls/CallOverlay'
@@ -28,6 +30,8 @@ const setToken = (value: string) => localStorage.setItem('chatapp_token', value)
 const clearToken = () => localStorage.removeItem('chatapp_token')
 
 function App() {
+  const navigate = useNavigate()
+  const location = useLocation()
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
   const [view, setView] = useState<'chat' | 'account'>('chat')
   const [token, setAuthToken] = useState(getToken())
@@ -206,42 +210,77 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
+    const params = new URLSearchParams(location.search)
     const verified = params.get('verified')
     if (verified === 'success' || verified === 'error') {
       setVerificationStatus(verified)
       setAuthMode('login')
       setVerificationSent(false)
-      params.delete('verified')
-      const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`
-      window.history.replaceState({}, '', next)
+      setResetMode('')
+      navigate('/login', { replace: true })
+      return
     }
     const reset = params.get('reset')
     if (reset) {
+      setAuthMode('login')
+      setVerificationSent(false)
       if (reset === 'error') {
         setResetNotice('Reset link is invalid or expired.')
         setResetMode('request')
+        navigate('/forgot', { replace: true })
       } else {
         setResetToken(reset)
         setResetMode('reset')
+        navigate('/reset', { replace: true })
       }
-      setAuthMode('login')
-      setVerificationSent(false)
-      params.delete('reset')
-      const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`
-      window.history.replaceState({}, '', next)
     }
-  }, [])
+  }, [location.search, navigate])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
   }, [theme])
 
   useEffect(() => {
+    if (location.pathname === '/register') {
+      setAuthMode('register')
+      setResetMode('')
+      setVerificationSent(false)
+    }
+    if (location.pathname === '/login') {
+      setAuthMode('login')
+      setResetMode('')
+      setVerificationSent(false)
+    }
+    if (location.pathname === '/forgot') {
+      setAuthMode('login')
+      setResetMode('request')
+      setVerificationSent(false)
+    }
+    if (location.pathname === '/reset') {
+      setAuthMode('login')
+      setResetMode(resetToken ? 'reset' : 'request')
+      setVerificationSent(false)
+    }
+    if (location.pathname === '/check-email') {
+      setAuthMode('login')
+      setResetMode('')
+      setVerificationSent(true)
+    }
+  }, [location.pathname, resetToken])
+
+  useEffect(() => {
     if (user?.id) {
       setOnlineUsers((prev) => ({ ...prev, [user.id]: true }))
     }
   }, [user?.id])
+
+  useEffect(() => {
+    if (token && user) {
+      if (location.pathname !== '/app') {
+        navigate('/app', { replace: true })
+      }
+    }
+  }, [token, user, location.pathname, navigate])
 
   useEffect(() => {
     localStorage.setItem(
@@ -914,11 +953,13 @@ function App() {
         setVerificationSent(true)
         setAuthMode('login')
         setAuthLoading(false)
+        navigate('/check-email')
         return
       }
       setToken(data.token)
       setAuthToken(data.token)
       setUser(data.user)
+      navigate('/app')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Auth failed')
     } finally {
@@ -940,6 +981,7 @@ function App() {
       })
       setResetNotice('If an account exists, a reset link has been sent.')
       setResetMode('request')
+      navigate('/forgot')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Request failed')
     } finally {
@@ -974,6 +1016,7 @@ function App() {
       setResetNotice('Password reset successfully. Please sign in.')
       setResetMode('')
       setResetToken('')
+      navigate('/login')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Reset failed')
     } finally {
@@ -1115,6 +1158,18 @@ function App() {
     })
     setUser(data.user)
     setProfileDirty(false)
+    if (data.requiresVerification) {
+      clearToken()
+      setAuthToken('')
+      setUser(null)
+      setConversations([])
+      setMessages([])
+      setActiveId(null)
+      setVerificationSent(true)
+      setAuthMode('login')
+      setView('chat')
+      navigate('/check-email')
+    }
   }
 
   const updatePassword = async (event: FormEvent<HTMLFormElement>) => {
@@ -1769,39 +1824,69 @@ function App() {
   if (loading) {
     return <div className="grid min-h-screen place-items-center">Loading...</div>
   }
-
-  if (!token || !user) {
-    return (
-      <AuthLanding
-        authMode={authMode}
-        authError={authError}
-        verificationSent={verificationSent}
-        verificationStatus={verificationStatus}
-        authLoading={authLoading}
-        resetMode={resetMode}
-        resetNotice={resetNotice}
-        showPassword={showPassword}
-        showConfirmPassword={showConfirmPassword}
-        showResetPassword={showResetPassword}
-        showResetConfirmPassword={showResetConfirmPassword}
-        onAuthSubmit={handleAuth}
-        onForgotPasswordSubmit={handleForgotPassword}
-        onResetPasswordSubmit={handleResetPassword}
-        onSetAuthMode={setAuthMode}
-        onToggleAuthMode={() =>
-          setAuthMode((current) => (current === 'login' ? 'register' : 'login'))
-        }
-        onSetResetMode={setResetMode}
-        onSetVerificationSent={setVerificationSent}
-        onTogglePassword={() => setShowPassword((prev) => !prev)}
-        onToggleConfirmPassword={() => setShowConfirmPassword((prev) => !prev)}
-        onToggleResetPassword={() => setShowResetPassword((prev) => !prev)}
-        onToggleResetConfirmPassword={() =>
-          setShowResetConfirmPassword((prev) => !prev)
-        }
-      />
-    )
+  const handleSetAuthMode = (mode: 'login' | 'register') => {
+    setAuthMode(mode)
+    setResetMode('')
+    setVerificationSent(false)
+    navigate(mode === 'login' ? '/login' : '/register')
   }
+
+  const handleToggleAuthMode = () => {
+    handleSetAuthMode(authMode === 'login' ? 'register' : 'login')
+  }
+
+  const handleSetResetMode = (mode: 'request' | 'reset' | '') => {
+    setResetMode(mode)
+    setVerificationSent(false)
+    setAuthMode('login')
+    if (mode === 'request') {
+      navigate('/forgot')
+    } else if (mode === 'reset') {
+      navigate('/reset')
+    } else {
+      navigate('/login')
+    }
+  }
+
+  const authPage = (
+    <div className="min-h-screen">
+      <div className="relative min-h-screen overflow-hidden">
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute -left-32 top-20 h-72 w-72 rounded-full bg-indigo-500/30 blur-[120px]" />
+          <div className="absolute right-0 top-0 h-96 w-96 rounded-full bg-cyan-400/20 blur-[140px]" />
+          <div className="absolute bottom-0 left-1/3 h-80 w-80 rounded-full bg-purple-500/30 blur-[130px]" />
+        </div>
+        <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-md items-center px-6">
+          <AuthCard
+            authMode={authMode}
+            authError={authError}
+            verificationSent={verificationSent}
+            verificationStatus={verificationStatus}
+            authLoading={authLoading}
+            resetMode={resetMode}
+            resetNotice={resetNotice}
+            showPassword={showPassword}
+            showConfirmPassword={showConfirmPassword}
+            showResetPassword={showResetPassword}
+            showResetConfirmPassword={showResetConfirmPassword}
+            onAuthSubmit={handleAuth}
+            onForgotPasswordSubmit={handleForgotPassword}
+            onResetPasswordSubmit={handleResetPassword}
+            onSetAuthMode={handleSetAuthMode}
+            onToggleAuthMode={handleToggleAuthMode}
+            onSetResetMode={handleSetResetMode}
+            onSetVerificationSent={setVerificationSent}
+            onTogglePassword={() => setShowPassword((prev) => !prev)}
+            onToggleConfirmPassword={() => setShowConfirmPassword((prev) => !prev)}
+            onToggleResetPassword={() => setShowResetPassword((prev) => !prev)}
+            onToggleResetConfirmPassword={() =>
+              setShowResetConfirmPassword((prev) => !prev)
+            }
+          />
+        </main>
+      </div>
+    </div>
+  )
 
   const handleOpenFriends = () => {
     setFriendsOpen(true)
@@ -1836,7 +1921,8 @@ function App() {
     </div>
   )
 
-  return (
+  const currentUser = user as ChatUser
+  const chatShell = (
     <div className="h-screen w-screen overflow-hidden">
       <div className="flex h-full flex-col md:flex-row">
 
@@ -1847,7 +1933,7 @@ function App() {
               setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))
             }
             onBackToChat={() => setView('chat')}
-            user={user}
+            user={currentUser}
             avatarPreview={avatarPreview}
             avatarName={avatarName}
             avatarFile={avatarFile}
@@ -1895,7 +1981,7 @@ function App() {
               className="hidden md:block m-4"
               groupedConversations={groupedConversations}
               activeId={activeId}
-              user={user}
+              user={currentUser}
               onlineUsers={onlineUsers}
               chatSearch={chatSearch}
               onChatSearchChange={setChatSearch}
@@ -1914,7 +2000,7 @@ function App() {
               activeName={activeName}
               activeSubtitle={activeSubtitle}
               activeAvatarSrc={activeAvatarSrc}
-              user={user}
+              user={currentUser}
               groupedMessages={groupedMessages}
               typingUsers={typingUsers}
               chatSearchOpen={chatSearchOpen}
@@ -1975,7 +2061,7 @@ function App() {
                     className="m-0 h-full w-full max-w-none"
                     groupedConversations={groupedConversations}
                     activeId={activeId}
-                    user={user}
+                    user={currentUser}
                     onlineUsers={onlineUsers}
                     chatSearch={chatSearch}
                     onChatSearchChange={setChatSearch}
@@ -2034,7 +2120,7 @@ function App() {
         open={groupManageOpen}
         onOpenChange={setGroupManageOpen}
         activeConversation={activeConversation}
-        user={user}
+        user={currentUser}
         friends={friends}
         manageMembers={manageMembers}
         onToggleManageMember={(userId, checked) => {
@@ -2061,7 +2147,7 @@ function App() {
         activeName={activeName}
         activeAvatarSrc={activeAvatarSrc}
         userAvatarSrc={getAvatarSrc(user)}
-        user={user}
+        user={currentUser}
         remoteVideoRef={remoteVideoRef}
         remoteMiniRef={remoteMiniRef}
         localVideoRef={localVideoRef}
@@ -2105,6 +2191,24 @@ function App() {
         onClose={handleCloseConfirm}
       />
     </div>
+  )
+
+  const isAuthed = Boolean(token && user)
+
+  return (
+    <Routes>
+      <Route path="/" element={<HomePage />} />
+      <Route path="/login" element={authPage} />
+      <Route path="/register" element={authPage} />
+      <Route path="/forgot" element={authPage} />
+      <Route path="/reset" element={authPage} />
+      <Route path="/check-email" element={authPage} />
+      <Route
+        path="/app"
+        element={isAuthed ? chatShell : <Navigate to="/login" replace />}
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   )
 }
 
