@@ -572,21 +572,55 @@ app.patch('/api/users/me', auth, async (req, res) => {
   if (!email || !displayName) {
     return res.status(400).json({ error: 'Missing fields' })
   }
+  const normalizedEmail = email.toLowerCase()
   const existing = await pool.query(
     'SELECT 1 FROM users WHERE email = $1 AND id != $2',
-    [email.toLowerCase(), req.userId]
+    [normalizedEmail, req.userId]
   )
   if (existing.rowCount > 0) {
     return res.status(409).json({ error: 'Email already registered' })
   }
+  const currentResult = await pool.query('SELECT email FROM users WHERE id = $1', [
+    req.userId,
+  ])
+  const currentEmail = currentResult.rows[0]?.email
+  const emailChanged = currentEmail !== normalizedEmail
+  const verificationToken = crypto.randomBytes(32).toString('hex')
+  const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000)
   const result = await pool.query(
     `UPDATE users
-     SET email = $1, display_name = $2
-     WHERE id = $3
+     SET email = $1,
+         display_name = $2,
+         email_verified = $3,
+         verification_token = $4,
+         verification_expires = $5
+     WHERE id = $6
      RETURNING *`,
-    [email.toLowerCase(), displayName, req.userId]
+    [
+      normalizedEmail,
+      displayName,
+      emailChanged ? false : true,
+      emailChanged ? verificationToken : null,
+      emailChanged ? verificationExpires : null,
+      req.userId,
+    ]
   )
-  return res.json({ user: sanitizeUser(result.rows[0]) })
+  if (emailChanged) {
+    try {
+      await sendVerificationEmail({
+        to: normalizedEmail,
+        displayName,
+        token: verificationToken,
+      })
+    } catch (error) {
+      console.error('Verification email failed:', error)
+      return res.status(500).json({ error: 'Failed to send verification email' })
+    }
+  }
+  return res.json({
+    user: sanitizeUser(result.rows[0]),
+    requiresVerification: emailChanged,
+  })
 })
 
 app.patch('/api/users/password', auth, async (req, res) => {

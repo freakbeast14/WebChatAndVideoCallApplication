@@ -1,7 +1,13 @@
 import nodemailer from 'nodemailer'
+import sgMail from '@sendgrid/mail'
 
+const emailProvider = (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase()
 const smtpUser = process.env.GMAIL_SMTP_USER || ''
 const smtpPass = process.env.GMAIL_SMTP_PASS || ''
+const sendgridApiKey = process.env.SENDGRID_API_KEY || ''
+const sendgridFromEmail = process.env.SENDGRID_FROM_EMAIL || ''
+const sendgridFromName = process.env.SENDGRID_FROM_NAME || ''
+const sendgridReplyTo = process.env.SENDGRID_REPLY_TO || ''
 const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:3001'
 const appName = 'SafeChat'
 
@@ -18,6 +24,33 @@ const createTransporter = () => {
   })
 }
 
+const sendEmail = async ({ to, subject, html }) => {
+  if (emailProvider === 'sendgrid') {
+    if (!sendgridApiKey || !sendgridFromEmail) {
+      throw new Error('Missing SendGrid credentials')
+    }
+    sgMail.setApiKey(sendgridApiKey)
+    await sgMail.send({
+      to,
+      from: {
+        email: sendgridFromEmail,
+        name: sendgridFromName || appName,
+      },
+      replyTo: sendgridReplyTo || undefined,
+      subject,
+      html,
+    })
+    return
+  }
+  const transporter = createTransporter()
+  await transporter.sendMail({
+    from: `${appName} <${smtpUser}>`,
+    to,
+    subject,
+    html,
+  })
+}
+
 export const buildVerifyEmailHtml = ({ displayName, verifyUrl }) => `
   <div style="background:#0b1a33;padding:32px;font-family:'Segoe UI',Arial,sans-serif;">
     <div style="max-width:540px;margin:0 auto;background:#0f2146;border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,0.12);">
@@ -30,7 +63,7 @@ export const buildVerifyEmailHtml = ({ displayName, verifyUrl }) => `
           Verify email
         </a>
         <p style="color:#94a3b8;margin:18px 0 0;font-size:12px;line-height:1.5;">
-          This link expires in 24 hours. If you didn’t create an account, you can ignore this email.
+          This link expires in 24 hours. If you didn't create an account, you can ignore this email.
         </p>
       </div>
       <div style="margin-top:24px;padding:16px 28px;border-top:1px solid rgba(255,255,255,0.08);">
@@ -41,11 +74,9 @@ export const buildVerifyEmailHtml = ({ displayName, verifyUrl }) => `
 `
 
 export const sendVerificationEmail = async ({ to, displayName, token }) => {
-  const transporter = createTransporter()
   const verifyUrl = `${serverBaseUrl}/api/auth/verify?token=${token}`
   const html = buildVerifyEmailHtml({ displayName, verifyUrl })
-  await transporter.sendMail({
-    from: `${appName} <${smtpUser}>`,
+  await sendEmail({
     to,
     subject: `Verify your ${appName} email`,
     html,
@@ -64,7 +95,7 @@ export const buildResetEmailHtml = ({ displayName, resetUrl }) => `
           Reset password
         </a>
         <p style="color:#94a3b8;margin:18px 0 0;font-size:12px;line-height:1.5;">
-          This link expires in 30 minutes. If you didn’t request a reset, you can ignore this email.
+          This link expires in 30 minutes. If you didn't request a reset, you can ignore this email.
         </p>
       </div>
       <div style="margin-top:24px;padding:16px 28px;border-top:1px solid rgba(255,255,255,0.08);">
@@ -75,11 +106,9 @@ export const buildResetEmailHtml = ({ displayName, resetUrl }) => `
 `
 
 export const sendPasswordResetEmail = async ({ to, displayName, token }) => {
-  const transporter = createTransporter()
   const resetUrl = `${serverBaseUrl}/api/auth/reset?token=${token}`
   const html = buildResetEmailHtml({ displayName, resetUrl })
-  await transporter.sendMail({
-    from: `${appName} <${smtpUser}>`,
+  await sendEmail({
     to,
     subject: `Reset your ${appName} password`,
     html,
