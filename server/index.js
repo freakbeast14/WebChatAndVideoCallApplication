@@ -45,6 +45,7 @@ const sanitizeUser = (user) => ({
   email: user.email,
   displayName: user.display_name,
   avatarUrl: user.avatar_url,
+  roleId: user.role_id,
   emailVerified: user.email_verified,
   createdAt: user.created_at,
 })
@@ -101,12 +102,39 @@ const auth = async (req, res, next) => {
   }
 }
 
+const requireAdmin = async (req, res, next) => {
+  const result = await pool.query('SELECT role_id FROM users WHERE id = $1', [
+    req.userId,
+  ])
+  const roleId = result.rows[0]?.role_id
+  if (!roleId) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+  if (roleId !== 2) {
+    return res.status(403).json({ error: 'Admin access required' })
+  }
+  return next()
+}
+
 const isMember = async (conversationId, userId) => {
   const result = await pool.query(
     'SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2',
     [conversationId, userId]
   )
   return result.rowCount > 0
+}
+
+const findDirectConversationId = async (userId, friendId) => {
+  const result = await pool.query(
+    `SELECT c.id FROM conversations c
+     JOIN conversation_members cm ON cm.conversation_id = c.id
+     WHERE c.type = 'direct'
+     GROUP BY c.id
+     HAVING array_agg(cm.user_id ORDER BY cm.user_id) = $1
+     LIMIT 1`,
+    [[userId, friendId].sort()]
+  )
+  return result.rows[0]?.id ?? null
 }
 
 const getConversationIdsForUser = async (userId) => {
@@ -659,6 +687,432 @@ app.get('/api/users/search', auth, async (req, res) => {
   return res.json({ users: result.rows.map(sanitizeUser) })
 })
 
+app.get('/api/admin/users', auth, requireAdmin, async (req, res) => {
+  const query = String(req.query.q ?? '').toLowerCase()
+  const result = await pool.query(
+    `SELECT * FROM users
+     WHERE lower(display_name) LIKE $1 OR lower(email) LIKE $1
+     ORDER BY created_at DESC`,
+    [`%${query}%`]
+  )
+  return res.json({ users: result.rows.map(sanitizeUser) })
+})
+
+app.get('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
+  const result = await pool.query('SELECT * FROM users WHERE id = $1', [
+    req.params.id,
+  ])
+  const user = result.rows[0]
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+  return res.json({ user: sanitizeUser(user) })
+})
+
+app.patch('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
+  const { email, displayName, password } = req.body ?? {}
+  const targetId = req.params.id
+  if (!email || !displayName) {
+    return res.status(400).json({ error: 'Missing fields' })
+  }
+  const normalizedEmail = email.toLowerCase()
+  const existing = await pool.query(
+    'SELECT 1 FROM users WHERE email = $1 AND id != $2',
+    [normalizedEmail, targetId]
+  )
+  if (existing.rowCount > 0) {
+    return res.status(409).json({ error: 'Email already registered' })
+  }
+  let passwordHash = null
+  if (password) {
+    passwordHash = await bcrypt.hash(password, 10)
+  }
+  const result = await pool.query(
+    `UPDATE users
+     SET email = $1,
+         display_name = $2,
+         email_verified = TRUE,
+         verification_token = NULL,
+         verification_expires = NULL,
+         password_hash = COALESCE($3, password_hash)
+     WHERE id = $4
+     RETURNING *`,
+    [normalizedEmail, displayName, passwordHash, targetId]
+  )
+  if (!result.rows[0]) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+  return res.json({ user: sanitizeUser(result.rows[0]) })
+})
+
+app.post(
+  '/api/admin/users/:id/avatar',
+  auth,
+  requireAdmin,
+  upload.single('avatar'),
+  async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Missing file' })
+    }
+    const targetId = req.params.id
+    const current = await pool.query('SELECT avatar_url FROM users WHERE id = $1', [
+      targetId,
+    ])
+    const previous = current.rows[0]?.avatar_url
+    const ext = path.extname(req.file.originalname) || '.png'
+    const filename = `avatars/avatar-${targetId}-${Date.now()}${ext}`
+    if (useSupabaseStorage) {
+      await uploadToStorage({
+        filePath: req.file.path,
+        key: filename,
+        contentType: req.file.mimetype,
+      })
+      await fs.unlink(req.file.path)
+    } else {
+      await fs.mkdir(path.join(uploadsDir, 'avatars'), { recursive: true })
+      await fs.rename(req.file.path, path.join(uploadsDir, filename))
+    }
+    await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [
+      filename,
+      targetId,
+    ])
+    if (previous) {
+      if (useSupabaseStorage) {
+        try {
+          await deleteFromStorage([previous])
+        } catch {
+          // Ignore missing old avatar.
+        }
+      } else {
+        try {
+          await fs.unlink(path.join(uploadsDir, previous))
+        } catch {
+          // Ignore missing old avatar.
+        }
+      }
+    }
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [
+      targetId,
+    ])
+    return res.json({ user: sanitizeUser(result.rows[0]) })
+  }
+)
+
+app.delete('/api/admin/users/:id/avatar', auth, requireAdmin, async (req, res) => {
+  const targetId = req.params.id
+  const current = await pool.query('SELECT avatar_url FROM users WHERE id = $1', [
+    targetId,
+  ])
+  const previous = current.rows[0]?.avatar_url
+  await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', ['', targetId])
+  if (previous) {
+    if (useSupabaseStorage) {
+      try {
+        await deleteFromStorage([previous])
+      } catch {
+        // Ignore missing old avatar.
+      }
+    } else {
+      try {
+        await fs.unlink(path.join(uploadsDir, previous))
+      } catch {
+        // Ignore missing old avatar.
+      }
+    }
+  }
+  const result = await pool.query('SELECT * FROM users WHERE id = $1', [targetId])
+  return res.json({ user: sanitizeUser(result.rows[0]) })
+})
+
+app.get('/api/admin/users/:id/friends', auth, requireAdmin, async (req, res) => {
+  const targetId = req.params.id
+  const result = await pool.query(
+    `SELECT DISTINCT ON (u.id) u.* FROM friends f
+     JOIN users u ON u.id = f.friend_id
+     WHERE f.user_id = $1
+     ORDER BY u.id, u.display_name ASC`,
+    [targetId]
+  )
+  return res.json({ friends: result.rows.map(sanitizeUser) })
+})
+
+app.post('/api/admin/users/:id/friends', auth, requireAdmin, async (req, res) => {
+  const targetId = req.params.id
+  const { friendId } = req.body ?? {}
+  if (!friendId) {
+    return res.status(400).json({ error: 'Missing friend' })
+  }
+  if (friendId === targetId) {
+    return res.status(400).json({ error: 'Cannot friend self' })
+  }
+  await pool.query(
+    `INSERT INTO friends (user_id, friend_id)
+     VALUES ($1, $2), ($2, $1)
+     ON CONFLICT DO NOTHING`,
+    [targetId, friendId]
+  )
+  const existingConversationId = await findDirectConversationId(targetId, friendId)
+  if (!existingConversationId) {
+    const convoResult = await pool.query(
+      `INSERT INTO conversations (type, name)
+       VALUES ('direct', NULL)
+       RETURNING *`
+    )
+    const conversation = convoResult.rows[0]
+    await pool.query(
+      `INSERT INTO conversation_members (conversation_id, user_id, role)
+       VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+      [conversation.id, targetId, friendId]
+    )
+    io.to(`user:${targetId}`).emit('conversation:refresh', {
+      conversationId: conversation.id,
+    })
+    io.to(`user:${friendId}`).emit('conversation:refresh', {
+      conversationId: conversation.id,
+    })
+  }
+  return res.json({ ok: true })
+})
+
+app.delete(
+  '/api/admin/users/:id/friends/:friendId',
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const targetId = req.params.id
+    const friendId = req.params.friendId
+    await pool.query(
+      'DELETE FROM friends WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)',
+      [targetId, friendId]
+    )
+    const conversationId = await findDirectConversationId(targetId, friendId)
+    if (conversationId) {
+      await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId])
+      io.to(`user:${targetId}`).emit('conversation:refresh', { conversationId })
+      io.to(`user:${friendId}`).emit('conversation:refresh', { conversationId })
+    }
+    return res.json({ ok: true })
+  }
+)
+
+app.get('/api/admin/users/:id/groups', auth, requireAdmin, async (req, res) => {
+  const targetId = req.params.id
+  const result = await pool.query(
+    `SELECT c.* FROM conversations c
+     JOIN conversation_members cm ON cm.conversation_id = c.id
+     WHERE c.type = 'group' AND cm.user_id = $1
+     ORDER BY c.created_at DESC`,
+    [targetId]
+  )
+  return res.json({ groups: result.rows })
+})
+
+app.get('/api/admin/groups', auth, requireAdmin, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT c.*,
+        json_agg(
+          json_build_object(
+            'id', u.id,
+            'email', u.email,
+            'displayName', u.display_name,
+            'avatarUrl', u.avatar_url,
+            'roleId', u.role_id
+          )
+          ORDER BY u.display_name
+        ) AS members
+     FROM conversations c
+     JOIN conversation_members cm ON cm.conversation_id = c.id
+     JOIN users u ON u.id = cm.user_id
+     WHERE c.type = 'group'
+     GROUP BY c.id
+     ORDER BY c.created_at DESC`
+  )
+  return res.json({ groups: result.rows })
+})
+
+app.post('/api/admin/groups', auth, requireAdmin, async (req, res) => {
+  const { name, memberIds } = req.body ?? {}
+  const members = Array.from(new Set(memberIds ?? []))
+  if (!name) {
+    return res.status(400).json({ error: 'Group name required' })
+  }
+  const convoResult = await pool.query(
+    `INSERT INTO conversations (type, name)
+     VALUES ('group', $1)
+     RETURNING *`,
+    [name]
+  )
+  const conversation = convoResult.rows[0]
+  if (members.length > 0) {
+    const values = members
+      .map(
+        (memberId, index) =>
+          `($${index * 2 + 1}, $${index * 2 + 2}, 'member')`
+      )
+      .join(', ')
+    const params = members.flatMap((memberId) => [conversation.id, memberId])
+    await pool.query(
+      `INSERT INTO conversation_members (conversation_id, user_id, role)
+       VALUES ${values}
+       ON CONFLICT DO NOTHING`,
+      params
+    )
+    members.forEach((memberId) => {
+      io.to(`user:${memberId}`).emit('conversation:refresh', {
+        conversationId: conversation.id,
+      })
+    })
+  }
+  return res.json({ group: conversation })
+})
+
+app.post(
+  '/api/admin/groups/:id/members',
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const conversationId = req.params.id
+    const { memberIds } = req.body ?? {}
+    const members = Array.from(new Set(memberIds ?? []))
+    if (members.length === 0) {
+      return res.json({ ok: true })
+    }
+    const values = members
+      .map(
+        (memberId, index) =>
+          `($${index * 2 + 1}, $${index * 2 + 2}, 'member')`
+      )
+      .join(', ')
+    const params = members.flatMap((memberId) => [conversationId, memberId])
+    await pool.query(
+      `INSERT INTO conversation_members (conversation_id, user_id, role)
+       VALUES ${values}
+       ON CONFLICT DO NOTHING`,
+      params
+    )
+    members.forEach((memberId) => {
+      io.to(`user:${memberId}`).emit('conversation:refresh', {
+        conversationId,
+      })
+    })
+    return res.json({ ok: true })
+  }
+)
+
+app.delete(
+  '/api/admin/groups/:id/members/:userId',
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const conversationId = req.params.id
+    const targetUserId = req.params.userId
+    await pool.query(
+      'DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2',
+      [conversationId, targetUserId]
+    )
+    return res.json({ ok: true })
+  }
+)
+
+app.delete('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
+  const targetId = req.params.id
+  if (targetId === req.userId) {
+    return res.status(400).json({ error: 'Cannot delete your own account' })
+  }
+  const userResult = await pool.query('SELECT avatar_url FROM users WHERE id = $1', [
+    targetId,
+  ])
+  if (userResult.rowCount === 0) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+  const avatarUrl = userResult.rows[0]?.avatar_url
+  const directResult = await pool.query(
+    `SELECT c.id FROM conversations c
+     JOIN conversation_members cm ON cm.conversation_id = c.id
+     WHERE c.type = 'direct' AND cm.user_id = $1`,
+    [targetId]
+  )
+  const directConversationIds = directResult.rows.map((row) => row.id)
+  const directFilesResult =
+    directConversationIds.length > 0
+      ? await pool.query(
+          'SELECT filename FROM files WHERE conversation_id = ANY($1::uuid[])',
+          [directConversationIds]
+        )
+      : { rows: [] }
+  const fileResult = await pool.query(
+    'SELECT filename FROM files WHERE uploaded_by = $1',
+    [targetId]
+  )
+  const fileKeys = fileResult.rows.map((row) => row.filename).filter(Boolean)
+  const directFileKeys = directFilesResult.rows
+    .map((row) => row.filename)
+    .filter(Boolean)
+  const deleteKeys = [...fileKeys, ...directFileKeys, avatarUrl].filter(Boolean)
+  if (deleteKeys.length > 0) {
+    if (useSupabaseStorage) {
+      try {
+        await deleteFromStorage(deleteKeys)
+      } catch {
+        // Ignore storage cleanup failures.
+      }
+    } else {
+      for (const key of deleteKeys) {
+        try {
+          await fs.unlink(path.join(uploadsDir, key))
+        } catch {
+          // Ignore missing files.
+        }
+      }
+    }
+  }
+  if (directConversationIds.length > 0) {
+    await pool.query('DELETE FROM conversations WHERE id = ANY($1::uuid[])', [
+      directConversationIds,
+    ])
+  }
+  await pool.query('DELETE FROM users WHERE id = $1', [targetId])
+  return res.json({ ok: true })
+})
+
+app.delete('/api/admin/groups/:id', auth, requireAdmin, async (req, res) => {
+  const conversationId = req.params.id
+  const convo = await pool.query('SELECT * FROM conversations WHERE id = $1', [
+    conversationId,
+  ])
+  const conversation = convo.rows[0]
+  if (!conversation) {
+    return res.status(404).json({ error: 'Group not found' })
+  }
+  if (conversation.type !== 'group') {
+    return res.status(400).json({ error: 'Not a group conversation' })
+  }
+  const fileResult = await pool.query(
+    'SELECT filename FROM files WHERE conversation_id = $1',
+    [conversationId]
+  )
+  const fileKeys = fileResult.rows.map((row) => row.filename).filter(Boolean)
+  if (fileKeys.length > 0) {
+    if (useSupabaseStorage) {
+      try {
+        await deleteFromStorage(fileKeys)
+      } catch {
+        // Ignore storage cleanup failures.
+      }
+    } else {
+      for (const key of fileKeys) {
+        try {
+          await fs.unlink(path.join(uploadsDir, key))
+        } catch {
+          // Ignore missing files.
+        }
+      }
+    }
+  }
+  await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId])
+  return res.json({ ok: true })
+})
+
 app.post('/api/friends/request', auth, async (req, res) => {
   const { toUserId } = req.body ?? {}
   if (!toUserId) {
@@ -736,7 +1190,7 @@ app.get('/api/friends/requests', auth, async (req, res) => {
     direction === 'out'
       ? []
       : await pool.query(
-          `SELECT fr.*, u.id as user_id, u.email, u.display_name, u.avatar_url
+          `SELECT fr.*, u.id as user_id, u.email, u.display_name, u.avatar_url, u.role_id
            FROM friend_requests fr
            JOIN users u ON u.id = fr.from_user_id
            WHERE fr.to_user_id = $1
@@ -747,7 +1201,7 @@ app.get('/api/friends/requests', auth, async (req, res) => {
     direction === 'in'
       ? []
       : await pool.query(
-          `SELECT fr.*, u.id as user_id, u.email, u.display_name, u.avatar_url
+          `SELECT fr.*, u.id as user_id, u.email, u.display_name, u.avatar_url, u.role_id
            FROM friend_requests fr
            JOIN users u ON u.id = fr.to_user_id
            WHERE fr.from_user_id = $1
@@ -763,6 +1217,7 @@ app.get('/api/friends/requests', auth, async (req, res) => {
         email: row.email,
         displayName: row.display_name,
         avatarUrl: row.avatar_url,
+        roleId: row.role_id,
       },
     })),
     outgoing: outgoing.rows?.map((row) => ({
@@ -773,6 +1228,7 @@ app.get('/api/friends/requests', auth, async (req, res) => {
         email: row.email,
         displayName: row.display_name,
         avatarUrl: row.avatar_url,
+        roleId: row.role_id,
       },
     })),
   })
@@ -913,7 +1369,8 @@ app.get('/api/conversations', auth, async (req, res) => {
             'id', u.id,
             'email', u.email,
             'displayName', u.display_name,
-            'avatarUrl', u.avatar_url
+            'avatarUrl', u.avatar_url,
+            'roleId', u.role_id
           )
           ORDER BY u.display_name
         ) AS members

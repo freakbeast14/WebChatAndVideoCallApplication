@@ -9,12 +9,21 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core'
 
+export const roles = pgTable('roles', {
+  id: integer('id').primaryKey(),
+  name: text('name').notNull().unique(),
+})
+
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().default(sql`uuid_generate_v4()`),
   email: text('email').notNull().unique(),
   displayName: text('display_name').notNull(),
   avatarUrl: text('avatar_url').notNull().default(''),
   passwordHash: text('password_hash').notNull(),
+  roleId: integer('role_id')
+    .notNull()
+    .references(() => roles.id, { onDelete: 'restrict' })
+    .default(1),
   emailVerified: boolean('email_verified').notNull().default(false),
   verificationToken: text('verification_token'),
   verificationExpires: timestamp('verification_expires', { withTimezone: true }),

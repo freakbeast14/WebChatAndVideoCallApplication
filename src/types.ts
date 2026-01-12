@@ -3,6 +3,7 @@ export type User = {
   email: string
   displayName: string
   avatarUrl: string
+  roleId: number
 }
 
 export type Conversation = {

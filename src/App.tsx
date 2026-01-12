@@ -11,6 +11,7 @@ import CallOverlay from '@/components/calls/CallOverlay'
 import FriendsDialog from '@/components/dialogs/FriendsDialog'
 import GroupDialog from '@/components/dialogs/GroupDialog'
 import GroupManageDialog from '@/components/dialogs/GroupManageDialog'
+import AdminView from '@/components/admin/AdminView'
 import SettingsView from '@/components/settings/SettingsView'
 import AvatarCropDialog from '@/components/settings/AvatarCropDialog'
 import ConfirmDialog from '@/components/ui/confirm-dialog'
@@ -33,7 +34,7 @@ function App() {
   const navigate = useNavigate()
   const location = useLocation()
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
-  const [view, setView] = useState<'chat' | 'account'>('chat')
+  const [view, setView] = useState<'chat' | 'account' | 'admin'>('chat')
   const [token, setAuthToken] = useState(getToken())
   const [user, setUser] = useState<ChatUser | null>(null)
   const [loading, setLoading] = useState(true)
@@ -273,6 +274,12 @@ function App() {
       setOnlineUsers((prev) => ({ ...prev, [user.id]: true }))
     }
   }, [user?.id])
+
+  useEffect(() => {
+    if (view === 'admin' && user?.roleId !== 2) {
+      setView('chat')
+    }
+  }, [view, user?.roleId])
 
   useEffect(() => {
     if (token && user) {
@@ -1921,8 +1928,8 @@ function App() {
     </div>
   )
 
-  const currentUser = user as ChatUser
-  const chatShell = (
+  const currentUser = user
+  const chatShell = currentUser ? (
     <div className="h-screen w-screen overflow-hidden">
       <div className="flex h-full flex-col md:flex-row">
 
@@ -1975,6 +1982,16 @@ function App() {
               setConfirmState({ open: true, kind: 'sign-out' })
             }}
           />
+        ) : view === 'admin' ? (
+          <AdminView
+            user={currentUser}
+            authToken={token}
+            onBackToChat={() => setView('chat')}
+            onStartChat={async (userId) => {
+              await createDirectChat(userId)
+              setView('chat')
+            }}
+          />
         ) : (
           <>
             <ChatList
@@ -1992,6 +2009,8 @@ function App() {
               onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
               view={view}
               onOpenSettings={() => setView('account')}
+              showAdmin={currentUser.roleId === 2}
+              onOpenAdmin={() => setView('admin')}
               truncateText={truncateText}
             />
 
@@ -2074,6 +2093,8 @@ function App() {
                     }
                     view={view}
                     onOpenSettings={() => setView('account')}
+                    showAdmin={currentUser.roleId === 2}
+                    onOpenAdmin={() => setView('admin')}
                     truncateText={truncateText}
                   />
                 </div>
@@ -2191,7 +2212,7 @@ function App() {
         onClose={handleCloseConfirm}
       />
     </div>
-  )
+  ) : null
 
   const isAuthed = Boolean(token && user)
 
