@@ -13,6 +13,41 @@ type AdminGroup = {
   members?: User[]
 }
 
+type AuditLog = {
+  id: string
+  adminName: string
+  adminEmail: string
+  action: string
+  targetId: string | null
+  targetName?: string | null
+  targetEmail?: string | null
+  targetGroupName?: string | null
+  friendName?: string | null
+  friendEmail?: string | null
+  memberName?: string | null
+  memberEmail?: string | null
+  meta: Record<string, unknown> | null
+  createdAt: string
+}
+
+const formatAuditAction = (action: string) => {
+  const map: Record<string, string> = {
+    'admin.user.update': 'Updated user profile',
+    'admin.user.avatar.update': 'Updated user avatar',
+    'admin.user.avatar.remove': 'Removed user avatar',
+    'admin.user.delete': 'Deleted user',
+    'admin.friend.add': 'Added friend',
+    'admin.friend.remove': 'Removed friend',
+    'admin.group.create': 'Created group',
+    'admin.group.member.add': 'Added group member',
+    'admin.group.member.remove': 'Removed group member',
+    'admin.group.delete': 'Deleted group',
+    'admin.retention.update': 'Updated retention days',
+    'admin.retention.purge': 'Ran retention cleanup',
+  }
+  return map[action] ?? action
+}
+
 type AdminViewProps = {
   user: User
   authToken: string
@@ -25,7 +60,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     () => ({ Authorization: `Bearer ${authToken}` }),
     [authToken]
   )
-  const [tab, setTab] = useState<'users' | 'groups'>('users')
+  const [tab, setTab] = useState<'users' | 'groups' | 'system'>('users')
   const [userSearch, setUserSearch] = useState('')
   const [users, setUsers] = useState<User[]>([])
   const [groups, setGroups] = useState<AdminGroup[]>([])
@@ -40,6 +75,11 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
   const [groupMemberSearch, setGroupMemberSearch] = useState('')
   const [groupMemberResults, setGroupMemberResults] = useState<User[]>([])
   const [activeGroup, setActiveGroup] = useState<AdminGroup | null>(null)
+  const [retentionDaysValue, setRetentionDaysValue] = useState(7)
+  const [retentionDraft, setRetentionDraft] = useState('7')
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [purgeRunning, setPurgeRunning] = useState(false)
   const [createGroupName, setCreateGroupName] = useState('')
   const [createMemberSearch, setCreateMemberSearch] = useState('')
   const [createMemberResults, setCreateMemberResults] = useState<User[]>([])
@@ -51,6 +91,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
       | 'delete-group'
       | 'remove-friend'
       | 'remove-group-member'
+      | 'purge-retention'
       | null
     friendId?: string | null
     groupId?: string | null
@@ -78,6 +119,21 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     }
   }
 
+  const loadSettings = async () => {
+    const data = await fetchJson('/api/admin/settings', {
+      headers: authHeader,
+    })
+    setRetentionDaysValue(data.retentionDays)
+    setRetentionDraft(String(data.retentionDays))
+  }
+
+  const loadAuditLogs = async () => {
+    const data = await fetchJson('/api/admin/audit?limit=50', {
+      headers: authHeader,
+    })
+    setAuditLogs(data.logs ?? [])
+  }
+
   const loadUserDetails = async (targetId: string) => {
     const [friendsData, groupsData] = await Promise.all([
       fetchJson(`/api/admin/users/${targetId}/friends`, {
@@ -94,6 +150,8 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
   useEffect(() => {
     loadUsers('')
     loadGroups()
+    loadSettings()
+    loadAuditLogs()
   }, [])
 
   useEffect(() => {
@@ -166,6 +224,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     setSelectedUser(data.user)
     setUsers((prev) => prev.map((item) => (item.id === data.user.id ? data.user : item)))
     setEditPassword('')
+    await loadAuditLogs()
   }
 
   const handleAvatarUpload = async (file: File) => {
@@ -183,6 +242,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     }
     setSelectedUser(data.user)
     setUsers((prev) => prev.map((item) => (item.id === data.user.id ? data.user : item)))
+    await loadAuditLogs()
   }
 
   const handleAvatarRemove = async () => {
@@ -193,6 +253,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     })
     setSelectedUser(data.user)
     setUsers((prev) => prev.map((item) => (item.id === data.user.id ? data.user : item)))
+    await loadAuditLogs()
   }
 
   const handleAddFriend = async (friendId: string) => {
@@ -204,6 +265,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     })
     setFriendSearch('')
     loadUserDetails(selectedUser.id)
+    await loadAuditLogs()
   }
 
   const handleRemoveFriend = async (friendId: string) => {
@@ -213,6 +275,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
       headers: authHeader,
     })
     loadUserDetails(selectedUser.id)
+    await loadAuditLogs()
   }
 
   const handleAddGroupMember = async (groupId: string, memberId: string) => {
@@ -222,6 +285,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
       body: JSON.stringify({ memberIds: [memberId] }),
     })
     await loadGroups()
+    await loadAuditLogs()
   }
 
   const handleRemoveGroupMember = async (groupId: string, memberId: string) => {
@@ -230,6 +294,38 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
       headers: authHeader,
     })
     await loadGroups()
+    await loadAuditLogs()
+  }
+
+  const handleSaveRetention = async () => {
+    const nextValue = Number(retentionDraft)
+    if (!Number.isFinite(nextValue)) return
+    setSettingsSaving(true)
+    try {
+      const data = await fetchJson('/api/admin/settings/retention', {
+        method: 'PATCH',
+        headers: authHeader,
+        body: JSON.stringify({ days: nextValue }),
+      })
+      setRetentionDaysValue(data.retentionDays)
+      setRetentionDraft(String(data.retentionDays))
+      await loadAuditLogs()
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+
+  const handlePurgeRetention = async () => {
+    setPurgeRunning(true)
+    try {
+      await fetchJson('/api/admin/retention/purge', {
+        method: 'POST',
+        headers: authHeader,
+      })
+      await loadAuditLogs()
+    } finally {
+      setPurgeRunning(false)
+    }
   }
 
   const handleCreateGroup = async () => {
@@ -245,6 +341,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     setCreateMemberResults([])
     setCreateMembers([])
     await loadGroups()
+    await loadAuditLogs()
   }
 
   const handleDeleteUser = async () => {
@@ -255,6 +352,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     })
     setSelectedUser(null)
     await loadUsers(userSearch.trim())
+    await loadAuditLogs()
   }
 
   const handleDeleteGroup = async () => {
@@ -265,6 +363,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
     })
     setGroups((prev) => prev.filter((group) => group.id !== activeGroup.id))
     setActiveGroup(null)
+    await loadAuditLogs()
   }
 
   const handleConfirm = async () => {
@@ -283,6 +382,9 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
       confirmState.memberId
     ) {
       await handleRemoveGroupMember(confirmState.groupId, confirmState.memberId)
+    }
+    if (confirmState.kind === 'purge-retention') {
+      await handlePurgeRetention()
     }
     setConfirmState({ open: false, kind: null })
   }
@@ -307,6 +409,12 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
   const filteredCreateResults = createMemberResults.filter(
     (candidate) => !createMembers.some((member) => member.id === candidate.id)
   )
+
+  const retentionDirty =
+    retentionDraft.trim().length > 0 &&
+    Number(retentionDraft) !== retentionDaysValue &&
+    Number(retentionDraft) >= 1 &&
+    Number(retentionDraft) <= 365
 
   return (
     <div className="h-full w-full p-4 md:p-6">
@@ -338,6 +446,15 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
             }`}
           >
             Groups
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('system')}
+            className={`rounded-full px-3 py-1 text-xs ${
+              tab === 'system' ? 'bg-white/20 text-white' : 'text-muted-foreground'
+            }`}
+          >
+            System
           </button>
         </div>
       </div>
@@ -567,7 +684,7 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
             )}
           </div>
         </div>
-      ) : (
+      ) : tab === 'groups' ? (
         <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <p className="text-sm font-semibold">Groups</p>
@@ -745,6 +862,96 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
             </div>
           </div>
         </div>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
+            <p className="text-sm font-semibold">Retention controls</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Adjust how long messages and files are kept (days).
+            </p>
+            <div className="mt-4 space-y-3">
+              <Input
+                type="number"
+                min={1}
+                max={365}
+                value={retentionDraft}
+                onChange={(event) => setRetentionDraft(event.target.value)}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  onClick={handleSaveRetention}
+                  disabled={!retentionDirty || settingsSaving}
+                >
+                  {settingsSaving ? 'Saving...' : 'Save retention'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="text-white bg-red-500 hover:bg-red-600"
+                  onClick={() =>
+                    setConfirmState({ open: true, kind: 'purge-retention' })
+                  }
+                  disabled={purgeRunning}
+                >
+                  {purgeRunning ? 'Running cleanup...' : 'Run cleanup now'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Current retention: {retentionDaysValue} days.
+              </p>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
+            <p className="text-sm font-semibold">Admin audit log</p>
+            <div className="mt-4 space-y-3 text-sm text-muted-foreground">
+              {auditLogs.length === 0 ? (
+                <p>No admin actions logged yet.</p>
+              ) : (
+                auditLogs.map((log) => (
+                  <div
+                    key={log.id}
+                    className="rounded-xl border border-white/10 bg-white/5 px-4 py-3"
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <span>
+                        {log.adminName} ({log.adminEmail})
+                      </span>
+                      <span>{new Date(log.createdAt).toLocaleString()}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-foreground">
+                      {formatAuditAction(log.action)}
+                    </p>
+                    {log.targetName || log.targetEmail || log.targetGroupName ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Target:{' '}
+                        {log.targetGroupName
+                          ? log.targetGroupName
+                          : log.targetName
+                            ? `${log.targetName}${log.targetEmail ? ` (${log.targetEmail})` : ''}`
+                            : log.targetEmail || log.targetId}
+                      </p>
+                    ) : null}
+                    {log.friendName || log.friendEmail ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Friend:{' '}
+                        {log.friendName
+                          ? `${log.friendName}${log.friendEmail ? ` (${log.friendEmail})` : ''}`
+                          : log.friendEmail}
+                      </p>
+                    ) : null}
+                    {log.memberName || log.memberEmail ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Member:{' '}
+                        {log.memberName
+                          ? `${log.memberName}${log.memberEmail ? ` (${log.memberEmail})` : ''}`
+                          : log.memberEmail}
+                      </p>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
       )}
       <ConfirmDialog
         open={confirmState.open}
@@ -755,25 +962,31 @@ const AdminView = ({ authToken, onBackToChat, onStartChat }: AdminViewProps) => 
               ? 'Delete group?'
               : confirmState.kind === 'remove-friend'
                 ? 'Remove friend?'
-                : 'Remove member?'
+                : confirmState.kind === 'remove-group-member'
+                  ? 'Remove member?'
+                  : 'Run cleanup now?'
         }
         description={
           confirmState.kind === 'delete-user'
             ? 'This permanently deletes the user and their data.'
             : confirmState.kind === 'delete-group'
               ? 'This deletes the group and its chat history.'
-              : confirmState.kind === 'remove-friend'
-                ? 'This removes the friend and clears their chat history.'
-                : 'This removes the member from the group.'
+            : confirmState.kind === 'remove-friend'
+              ? 'This removes the friend and clears their chat history.'
+              : confirmState.kind === 'remove-group-member'
+                ? 'This removes the member from the group.'
+                : 'This will purge all expired chats and files immediately.'
         }
         confirmLabel={
           confirmState.kind === 'delete-user'
             ? 'Delete user'
             : confirmState.kind === 'delete-group'
               ? 'Delete group'
-              : confirmState.kind === 'remove-friend'
-                ? 'Remove friend'
-                : 'Remove member'
+            : confirmState.kind === 'remove-friend'
+              ? 'Remove friend'
+              : confirmState.kind === 'remove-group-member'
+                ? 'Remove member'
+                : 'Run cleanup'
         }
         confirmTone="danger"
         onConfirm={handleConfirm}

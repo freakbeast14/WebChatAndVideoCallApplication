@@ -109,7 +109,13 @@ function App() {
   const [callMinimized, setCallMinimized] = useState(false)
   const [confirmState, setConfirmState] = useState<{
     open: boolean
-    kind: 'delete-message' | 'sign-out' | null
+    kind:
+      | 'delete-message'
+      | 'sign-out'
+      | 'clear-chat'
+      | 'leave-group'
+      | 'remove-friend'
+      | null
     messageId?: string | null
   }>({ open: false, kind: null })
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
@@ -1379,6 +1385,25 @@ function App() {
     event.target.value = ''
   }
 
+  const handlePasteImage = (event: React.ClipboardEvent<HTMLInputElement>) => {
+    const items = event.clipboardData?.items
+    if (!items) return
+    const imageItem = Array.from(items).find((item) =>
+      item.type.startsWith('image/')
+    )
+    if (!imageItem) return
+    const file = imageItem.getAsFile()
+    if (!file) return
+    if (pendingFilePreview) {
+      URL.revokeObjectURL(pendingFilePreview)
+    }
+    setPendingFile(file)
+    setPendingFileName(file.name || 'pasted-image.png')
+    setPendingFileIsImage(true)
+    setPendingFilePreview(URL.createObjectURL(file))
+    event.preventDefault()
+  }
+
   const handleReplyMessage = (messageId: string) => {
     setEditingMessageId(null)
     setReplyToId(messageId)
@@ -1408,6 +1433,48 @@ function App() {
     setConfirmState({ open: true, kind: 'delete-message', messageId })
   }
 
+  const refreshMessages = async (conversationId: string) => {
+    const data = await fetchJson(`/api/conversations/${conversationId}/messages`, {
+      headers: authHeader,
+    })
+    setMessages(data.messages.map(mapMessage))
+  }
+
+  const clearChatForMe = async () => {
+    if (!activeConversation) return
+    const conversationId = activeConversation.id
+    await fetchJson(`/api/conversations/${conversationId}/clear`, {
+      method: 'POST',
+      headers: authHeader,
+    })
+    setMessages([])
+    await fetchConversations()
+    setActiveId(conversationId)
+    await refreshMessages(conversationId)
+  }
+
+  const leaveGroup = async () => {
+    if (!activeConversation || activeConversation.type !== 'group') return
+    await fetchJson(`/api/conversations/${activeConversation.id}/leave`, {
+      method: 'POST',
+      headers: authHeader,
+    })
+    setActiveId(null)
+    setMessages([])
+    await fetchConversations()
+  }
+
+  const removeFriend = async () => {
+    if (!otherMemberId) return
+    await fetchJson(`/api/friends/${otherMemberId}`, {
+      method: 'DELETE',
+      headers: authHeader,
+    })
+    setActiveId(null)
+    setMessages([])
+    await fetchConversations()
+  }
+
   const handleConfirmAction = async () => {
     if (!confirmState.kind) return
     if (confirmState.kind === 'delete-message' && confirmState.messageId) {
@@ -1425,6 +1492,15 @@ function App() {
       setMessages([])
       setActiveId(null)
       setView('chat')
+    }
+    if (confirmState.kind === 'clear-chat') {
+      await clearChatForMe()
+    }
+    if (confirmState.kind === 'leave-group') {
+      await leaveGroup()
+    }
+    if (confirmState.kind === 'remove-friend') {
+      await removeFriend()
     }
     setConfirmState({ open: false, kind: null, messageId: null })
   }
@@ -2020,7 +2096,8 @@ function App() {
               activeSubtitle={activeSubtitle}
               activeAvatarSrc={activeAvatarSrc}
               user={currentUser}
-              groupedMessages={groupedMessages}
+                groupedMessages={groupedMessages}
+                hasMessages={groupedMessages.some((group) => group.items.length > 0)}
               typingUsers={typingUsers}
               chatSearchOpen={chatSearchOpen}
               onToggleChatSearchOpen={() => setChatSearchOpen((prev) => !prev)}
@@ -2045,12 +2122,21 @@ function App() {
               otherMemberId={otherMemberId}
               canCall={canCall}
               onStartCall={startCall}
-              onOpenGroupManage={() => {
-                setGroupManageOpen(true)
-                loadFriends()
-              }}
-              onOpenMobileChats={() => setMobileChatsOpen(true)}
-              messageText={messageText}
+                onOpenGroupManage={() => {
+                  setGroupManageOpen(true)
+                  loadFriends()
+                }}
+                onOpenMobileChats={() => setMobileChatsOpen(true)}
+                onClearChat={() =>
+                  setConfirmState({ open: true, kind: 'clear-chat' })
+                }
+                onLeaveGroup={() =>
+                  setConfirmState({ open: true, kind: 'leave-group' })
+                }
+                onRemoveFriend={() =>
+                  setConfirmState({ open: true, kind: 'remove-friend' })
+                }
+                messageText={messageText}
               onMessageTextChange={handleTyping}
               onSendMessage={sendMessage}
               replyToId={replyToId}
@@ -2065,12 +2151,13 @@ function App() {
               imageInputRef={imageInputRef}
               onImageChange={handleImageChange}
               uploadProgress={uploadProgress}
-              pendingFileName={pendingFileName}
-              pendingFilePreview={pendingFilePreview}
-              pendingFileIsImage={pendingFileIsImage}
-              onClearPendingFile={clearPendingFile}
-              fetchFilePreviewUrl={fetchFilePreviewUrl}
-            />
+                pendingFileName={pendingFileName}
+                pendingFilePreview={pendingFilePreview}
+                pendingFileIsImage={pendingFileIsImage}
+                onClearPendingFile={clearPendingFile}
+                onPasteImage={handlePasteImage}
+                fetchFilePreviewUrl={fetchFilePreviewUrl}
+              />
 
             {mobileChatsOpen ? (
               <div className="fixed inset-0 z-40 bg-black/60 p-4 md:hidden">
@@ -2197,17 +2284,44 @@ function App() {
         title={
           confirmState.kind === 'delete-message'
             ? 'Delete message?'
-            : 'Sign out?'
+            : confirmState.kind === 'clear-chat'
+              ? 'Clear chat for you?'
+              : confirmState.kind === 'leave-group'
+                ? 'Exit group?'
+                : confirmState.kind === 'remove-friend'
+                  ? 'Remove friend?'
+                  : 'Sign out?'
         }
         description={
           confirmState.kind === 'delete-message'
             ? 'This will remove the message for everyone in this chat.'
-            : 'You can sign back in anytime.'
+            : confirmState.kind === 'clear-chat'
+              ? 'This will remove the chat history only for you.'
+              : confirmState.kind === 'leave-group'
+                ? 'You will leave the group and stop receiving new messages.'
+                : confirmState.kind === 'remove-friend'
+                  ? 'This will remove the friend and clear your chat history.'
+                  : 'You can sign back in anytime.'
         }
         confirmLabel={
-          confirmState.kind === 'delete-message' ? 'Delete' : 'Sign out'
+          confirmState.kind === 'delete-message'
+            ? 'Delete'
+            : confirmState.kind === 'clear-chat'
+              ? 'Clear chat'
+              : confirmState.kind === 'leave-group'
+                ? 'Exit group'
+                : confirmState.kind === 'remove-friend'
+                  ? 'Remove friend'
+                  : 'Sign out'
         }
-        confirmTone={confirmState.kind === 'delete-message' ? 'danger' : 'default'}
+        confirmTone={
+          confirmState.kind === 'delete-message' ||
+          confirmState.kind === 'clear-chat' ||
+          confirmState.kind === 'leave-group' ||
+          confirmState.kind === 'remove-friend'
+            ? 'danger'
+            : 'default'
+        }
         onConfirm={handleConfirmAction}
         onClose={handleCloseConfirm}
       />
@@ -2226,7 +2340,7 @@ function App() {
       <Route path="/check-email" element={authPage} />
       <Route
         path="/app"
-        element={isAuthed ? chatShell : <Navigate to="/login" replace />}
+        element={isAuthed ? chatShell : <Navigate to="/" replace />}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

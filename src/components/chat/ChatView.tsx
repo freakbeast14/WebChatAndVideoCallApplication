@@ -18,6 +18,7 @@ import {
   User,
   Users,
   Video,
+  MoreVertical,
   ZoomIn,
   ZoomOut,
   X,
@@ -40,6 +41,7 @@ type ChatViewProps = {
   activeAvatarSrc: string
   user: ChatUser
   groupedMessages: MessageGroup[]
+  hasMessages: boolean
   typingUsers: string[]
   chatSearchOpen: boolean
   onToggleChatSearchOpen: () => void
@@ -58,6 +60,9 @@ type ChatViewProps = {
   onStartCall: (mode: 'video' | 'voice') => void
   onOpenGroupManage: () => void
   onOpenMobileChats: () => void
+  onClearChat: () => void
+  onLeaveGroup: () => void
+  onRemoveFriend: () => void
   messageText: string
   onMessageTextChange: (value: string) => void
   onSendMessage: () => void
@@ -77,6 +82,7 @@ type ChatViewProps = {
   pendingFilePreview: string
   pendingFileIsImage: boolean
   onClearPendingFile: () => void
+  onPasteImage: (event: React.ClipboardEvent<HTMLInputElement>) => void
   fetchFilePreviewUrl: (fileId: string) => Promise<string | null>
 }
 
@@ -87,6 +93,7 @@ const ChatView = ({
   activeAvatarSrc,
   user,
   groupedMessages,
+  hasMessages,
   typingUsers,
   chatSearchOpen,
   onToggleChatSearchOpen,
@@ -105,6 +112,9 @@ const ChatView = ({
   onStartCall,
   onOpenGroupManage,
   onOpenMobileChats,
+  onClearChat,
+  onLeaveGroup,
+  onRemoveFriend,
   messageText,
   onMessageTextChange,
   onSendMessage,
@@ -124,6 +134,7 @@ const ChatView = ({
   pendingFilePreview,
   pendingFileIsImage,
   onClearPendingFile,
+  onPasteImage,
   fetchFilePreviewUrl,
 }: ChatViewProps) => {
   const getFileBadgeClass = (extension: string) => {
@@ -239,6 +250,8 @@ const ChatView = ({
   }
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [atBottom, setAtBottom] = useState(true)
+  const [actionsOpen, setActionsOpen] = useState(false)
+  const actionsRef = useRef<HTMLDivElement | null>(null)
 
   const messageLookup = useMemo(() => {
     const map = new Map<string, Message>()
@@ -357,6 +370,18 @@ const ChatView = ({
     panStartRef.current = null
   }
 
+  useEffect(() => {
+    if (!actionsOpen) return
+    const handleClick = (event: MouseEvent) => {
+      if (!actionsRef.current) return
+      if (!actionsRef.current.contains(event.target as Node)) {
+        setActionsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [actionsOpen])
+
   return (
     <main className="flex flex-1 flex-col overflow-hidden !ml-0 md:m-4 md:rounded-2xl">
     <header className="flex items-center justify-between glass px-4 py-4 md:px-6 z-10">
@@ -467,6 +492,64 @@ const ChatView = ({
         >
           <Phone size={18} />
         </Button>
+        <div className="relative" ref={actionsRef}>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setActionsOpen((prev) => !prev)}
+            title="Chat actions"
+            disabled={!activeConversation}
+            className={actionsOpen ? 'bg-white/20 text-white' : undefined}
+          >
+            <MoreVertical size={18} />
+          </Button>
+          {actionsOpen ? (
+            <div className="absolute right-0 top-12 z-10 w-44 rounded-xl border border-white/30 bg-white/70 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/70">
+              <div className="pointer-events-none absolute -top-1 right-6 h-0 w-0">
+                <span className="absolute -top-1 left-0 h-0 w-0 border-x-8 border-b-8 border-x-transparent border-b-white/70 dark:border-b-slate-900/70" />
+                <span className="absolute left-[1px] top-0 h-0 w-0 border-x-7 border-b-7 border-x-transparent border-b-white/80 dark:border-b-slate-900/70" />
+              </div>
+              <button
+                type="button"
+                className={`w-full rounded-lg px-3 py-2 text-left text-sm ${
+                  hasMessages
+                    ? 'text-slate-900 hover:bg-white/60 dark:text-white dark:hover:bg-slate-800/80'
+                    : 'cursor-not-allowed text-slate-400 dark:text-slate-500'
+                }`}
+                disabled={!hasMessages}
+                onClick={() => {
+                  setActionsOpen(false)
+                  onClearChat()
+                }}
+              >
+                Clear chat
+              </button>
+              {activeConversation?.type === 'group' ? (
+                <button
+                  type="button"
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-500 hover:bg-white/60 dark:text-red-400 dark:hover:bg-slate-800/80"
+                  onClick={() => {
+                    setActionsOpen(false)
+                    onLeaveGroup()
+                  }}
+                >
+                  Exit group
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-500 hover:bg-white/60 dark:text-red-400 dark:hover:bg-slate-800/80"
+                  onClick={() => {
+                    setActionsOpen(false)
+                    onRemoveFriend()
+                  }}
+                >
+                  Remove friend
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
     </header>
 
@@ -781,7 +864,17 @@ const ChatView = ({
                               </p>
                             ) : message.file ? (
                               isImageFile(message.file.originalName) ? (
-                                <div className="mt-2 overflow-hidden rounded-xl border border-white/10 bg-white/5">
+                                <button
+                                  type="button"
+                                  className="mt-2 w-full overflow-hidden rounded-xl border border-white/10 bg-white/5"
+                                  onClick={() =>
+                                    setImageLightbox({
+                                      url: imageUrls[message.file!.id] || '',
+                                      name: message.file!.originalName,
+                                      fileId: message.file!.id,
+                                    })
+                                  }
+                                >
                                   {imageUrls[message.file.id] ? (
                                     <img
                                       src={imageUrls[message.file.id]}
@@ -793,7 +886,7 @@ const ChatView = ({
                                       Loading image...
                                     </div>
                                   )}
-                                </div>
+                                </button>
                               ) : (
                                 <button
                                   type="button"
@@ -835,7 +928,17 @@ const ChatView = ({
                             ) : null}
                             {!isDeleted && message.file && message.text ? (
                               isImageFile(message.file.originalName) ? (
-                                <div className="mt-2 overflow-hidden rounded-xl border border-white/10 bg-white/5">
+                                <button
+                                  type="button"
+                                  className="mt-2 w-full overflow-hidden rounded-xl border border-white/10 bg-white/5"
+                                  onClick={() =>
+                                    setImageLightbox({
+                                      url: imageUrls[message.file!.id] || '',
+                                      name: message.file!.originalName,
+                                      fileId: message.file!.id,
+                                    })
+                                  }
+                                >
                                   {imageUrls[message.file.id] ? (
                                     <img
                                       src={imageUrls[message.file.id]}
@@ -847,7 +950,7 @@ const ChatView = ({
                                       Loading image...
                                     </div>
                                   )}
-                                </div>
+                                </button>
                               ) : (
                                 <button
                                   type="button"
@@ -1233,6 +1336,7 @@ const ChatView = ({
           placeholder="Type a message"
           value={messageText}
           onChange={(event) => onMessageTextChange(event.target.value)}
+          onPaste={onPasteImage}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               onSendMessage()

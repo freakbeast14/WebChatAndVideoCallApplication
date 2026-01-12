@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import {
   boolean,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -12,6 +13,14 @@ import {
 export const roles = pgTable('roles', {
   id: integer('id').primaryKey(),
   name: text('name').notNull().unique(),
+})
+
+export const appSettings = pgTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 })
 
 export const users = pgTable('users', {
@@ -29,6 +38,19 @@ export const users = pgTable('users', {
   verificationExpires: timestamp('verification_expires', { withTimezone: true }),
   resetToken: text('reset_token'),
   resetExpires: timestamp('reset_expires', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+})
+
+export const adminAuditLogs = pgTable('admin_audit_logs', {
+  id: uuid('id').primaryKey().default(sql`uuid_generate_v4()`),
+  adminId: uuid('admin_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  action: text('action').notNull(),
+  targetId: uuid('target_id'),
+  meta: jsonb('meta'),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -78,6 +100,7 @@ export const conversationMembers = pgTable('conversation_members', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   role: text('role').notNull().default('member'),
+  clearedAt: timestamp('cleared_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),

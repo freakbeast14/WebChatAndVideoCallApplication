@@ -61,7 +61,7 @@ const AuthLanding = ({
             <Mail size={22} />
           </div>
           <div className="space-y-2">
-            <h2 className="text-xl font-semibold">Check your inbox</h2>
+            <h2 className="text-xl font-semibold">Check your inbox/spam</h2>
             <p className="text-sm text-muted-foreground">
               We have sent a verification email.
             </p>

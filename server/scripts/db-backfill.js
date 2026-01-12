@@ -8,6 +8,11 @@ const run = async () => {
      ON CONFLICT (id) DO NOTHING`
   )
   await pool.query(
+    `INSERT INTO app_settings (key, value)
+     VALUES ('retention_days', '7')
+     ON CONFLICT (key) DO NOTHING`
+  )
+  await pool.query(
     `UPDATE users
      SET role_id = 1
      WHERE role_id IS NULL`

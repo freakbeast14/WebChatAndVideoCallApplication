@@ -54,10 +54,41 @@ const issueToken = (userId) =>
   jwt.sign({ userId }, jwtSecret, { expiresIn: tokenExpiresIn })
 
 const requireEmailVerification = process.env.REQUIRE_EMAIL_VERIFICATION === 'true'
+const retentionCache = {
+  days: retentionDays,
+  fetchedAt: 0,
+}
+
+const getRetentionDays = async () => {
+  if (Date.now() - retentionCache.fetchedAt < 60_000) {
+    return retentionCache.days
+  }
+  const result = await pool.query(
+    `SELECT value FROM app_settings WHERE key = 'retention_days'`
+  )
+  const value = Number(result.rows[0]?.value)
+  const days = Number.isFinite(value) && value > 0 ? value : retentionDays
+  retentionCache.days = days
+  retentionCache.fetchedAt = Date.now()
+  return days
+}
+
+const setRetentionDays = async (days) => {
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ('retention_days', $1, now())
+     ON CONFLICT (key)
+     DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [String(days)]
+  )
+  retentionCache.days = days
+  retentionCache.fetchedAt = Date.now()
+}
 
 const purgeExpired = async () => {
   const now = new Date()
-  const cutoff = new Date(Date.now() - retentionMs)
+  const days = await getRetentionDays()
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
   const expiredFiles = await pool.query(
     'SELECT id, filename FROM files WHERE expires_at <= $1',
     [now]
@@ -114,6 +145,14 @@ const requireAdmin = async (req, res, next) => {
     return res.status(403).json({ error: 'Admin access required' })
   }
   return next()
+}
+
+const logAdminAction = async (adminId, action, targetId, meta) => {
+  await pool.query(
+    `INSERT INTO admin_audit_logs (admin_id, action, target_id, meta)
+     VALUES ($1, $2, $3, $4)`,
+    [adminId, action, targetId || null, meta || null]
+  )
 }
 
 const isMember = async (conversationId, userId) => {
@@ -742,6 +781,11 @@ app.patch('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
   if (!result.rows[0]) {
     return res.status(404).json({ error: 'User not found' })
   }
+  await logAdminAction(req.userId, 'admin.user.update', targetId, {
+    email: normalizedEmail,
+    displayName,
+    passwordChanged: Boolean(password),
+  })
   return res.json({ user: sanitizeUser(result.rows[0]) })
 })
 
@@ -794,6 +838,7 @@ app.post(
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [
       targetId,
     ])
+    await logAdminAction(req.userId, 'admin.user.avatar.update', targetId, null)
     return res.json({ user: sanitizeUser(result.rows[0]) })
   }
 )
@@ -821,6 +866,7 @@ app.delete('/api/admin/users/:id/avatar', auth, requireAdmin, async (req, res) =
     }
   }
   const result = await pool.query('SELECT * FROM users WHERE id = $1', [targetId])
+  await logAdminAction(req.userId, 'admin.user.avatar.remove', targetId, null)
   return res.json({ user: sanitizeUser(result.rows[0]) })
 })
 
@@ -871,6 +917,7 @@ app.post('/api/admin/users/:id/friends', auth, requireAdmin, async (req, res) =>
       conversationId: conversation.id,
     })
   }
+  await logAdminAction(req.userId, 'admin.friend.add', targetId, { friendId })
   return res.json({ ok: true })
 })
 
@@ -891,6 +938,7 @@ app.delete(
       io.to(`user:${targetId}`).emit('conversation:refresh', { conversationId })
       io.to(`user:${friendId}`).emit('conversation:refresh', { conversationId })
     }
+    await logAdminAction(req.userId, 'admin.friend.remove', targetId, { friendId })
     return res.json({ ok: true })
   }
 )
@@ -930,6 +978,75 @@ app.get('/api/admin/groups', auth, requireAdmin, async (_req, res) => {
   return res.json({ groups: result.rows })
 })
 
+app.get('/api/admin/audit', auth, requireAdmin, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 50), 200)
+  const result = await pool.query(
+    `SELECT
+        l.*,
+        u.display_name AS admin_name,
+        u.email AS admin_email,
+        tu.display_name AS target_name,
+        tu.email AS target_email,
+        c.name AS target_group_name,
+        fu.display_name AS friend_name,
+        fu.email AS friend_email,
+        mu.display_name AS member_name,
+        mu.email AS member_email
+     FROM admin_audit_logs l
+     JOIN users u ON u.id = l.admin_id
+     LEFT JOIN users tu ON tu.id = l.target_id
+     LEFT JOIN conversations c ON c.id = l.target_id
+     LEFT JOIN users fu ON fu.id = (l.meta->>'friendId')::uuid
+     LEFT JOIN users mu ON mu.id = (l.meta->>'memberId')::uuid
+     ORDER BY l.created_at DESC
+     LIMIT $1`,
+    [limit]
+  )
+  return res.json({
+    logs: result.rows.map((row) => ({
+      id: row.id,
+      adminId: row.admin_id,
+      adminName: row.admin_name,
+      adminEmail: row.admin_email,
+      action: row.action,
+      targetId: row.target_id,
+      targetName: row.target_name,
+      targetEmail: row.target_email,
+      targetGroupName: row.target_group_name,
+      friendName: row.friend_name,
+      friendEmail: row.friend_email,
+      memberName: row.member_name,
+      memberEmail: row.member_email,
+      meta: row.meta,
+      createdAt: row.created_at,
+    })),
+  })
+})
+
+app.get('/api/admin/settings', auth, requireAdmin, async (_req, res) => {
+  const days = await getRetentionDays()
+  return res.json({ retentionDays: days })
+})
+
+app.patch('/api/admin/settings/retention', auth, requireAdmin, async (req, res) => {
+  const { days } = req.body ?? {}
+  const value = Number(days)
+  if (!Number.isFinite(value) || value < 1 || value > 365) {
+    return res.status(400).json({ error: 'Retention days must be 1-365' })
+  }
+  await setRetentionDays(Math.floor(value))
+  await logAdminAction(req.userId, 'admin.retention.update', null, {
+    days: Math.floor(value),
+  })
+  return res.json({ retentionDays: Math.floor(value) })
+})
+
+app.post('/api/admin/retention/purge', auth, requireAdmin, async (req, res) => {
+  await purgeExpired()
+  await logAdminAction(req.userId, 'admin.retention.purge', null, null)
+  return res.json({ ok: true })
+})
+
 app.post('/api/admin/groups', auth, requireAdmin, async (req, res) => {
   const { name, memberIds } = req.body ?? {}
   const members = Array.from(new Set(memberIds ?? []))
@@ -963,6 +1080,10 @@ app.post('/api/admin/groups', auth, requireAdmin, async (req, res) => {
       })
     })
   }
+  await logAdminAction(req.userId, 'admin.group.create', conversation.id, {
+    name,
+    memberCount: members.length,
+  })
   return res.json({ group: conversation })
 })
 
@@ -995,6 +1116,9 @@ app.post(
         conversationId,
       })
     })
+    await logAdminAction(req.userId, 'admin.group.member.add', conversationId, {
+      memberIds: members,
+    })
     return res.json({ ok: true })
   }
 )
@@ -1010,6 +1134,9 @@ app.delete(
       'DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2',
       [conversationId, targetUserId]
     )
+    await logAdminAction(req.userId, 'admin.group.member.remove', conversationId, {
+      memberId: targetUserId,
+    })
     return res.json({ ok: true })
   }
 )
@@ -1019,13 +1146,16 @@ app.delete('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
   if (targetId === req.userId) {
     return res.status(400).json({ error: 'Cannot delete your own account' })
   }
-  const userResult = await pool.query('SELECT avatar_url FROM users WHERE id = $1', [
-    targetId,
-  ])
+  const userResult = await pool.query(
+    'SELECT avatar_url, display_name, email FROM users WHERE id = $1',
+    [targetId]
+  )
   if (userResult.rowCount === 0) {
     return res.status(404).json({ error: 'User not found' })
   }
   const avatarUrl = userResult.rows[0]?.avatar_url
+  const targetDisplayName = userResult.rows[0]?.display_name
+  const targetEmail = userResult.rows[0]?.email
   const directResult = await pool.query(
     `SELECT c.id FROM conversations c
      JOIN conversation_members cm ON cm.conversation_id = c.id
@@ -1071,6 +1201,11 @@ app.delete('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
       directConversationIds,
     ])
   }
+  await logAdminAction(req.userId, 'admin.user.delete', targetId, {
+    directConversationIds,
+    targetDisplayName,
+    targetEmail,
+  })
   await pool.query('DELETE FROM users WHERE id = $1', [targetId])
   return res.json({ ok: true })
 })
@@ -1109,6 +1244,9 @@ app.delete('/api/admin/groups/:id', auth, requireAdmin, async (req, res) => {
       }
     }
   }
+  await logAdminAction(req.userId, 'admin.group.delete', conversationId, {
+    name: conversation.name,
+  })
   await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId])
   return res.json({ ok: true })
 })
@@ -1181,6 +1319,43 @@ app.post('/api/friends/reject', auth, async (req, res) => {
     return res.status(404).json({ error: 'Request not found' })
   }
   await pool.query('DELETE FROM friend_requests WHERE id = $1', [requestId])
+  return res.json({ ok: true })
+})
+
+app.delete('/api/friends/:friendId', auth, async (req, res) => {
+  const friendId = req.params.friendId
+  await pool.query(
+    'DELETE FROM friends WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)',
+    [req.userId, friendId]
+  )
+  const conversationId = await findDirectConversationId(req.userId, friendId)
+  if (conversationId) {
+    const fileResult = await pool.query(
+      'SELECT filename FROM files WHERE conversation_id = $1',
+      [conversationId]
+    )
+    const fileKeys = fileResult.rows.map((row) => row.filename).filter(Boolean)
+    if (fileKeys.length > 0) {
+      if (useSupabaseStorage) {
+        try {
+          await deleteFromStorage(fileKeys)
+        } catch {
+          // Ignore storage cleanup failures.
+        }
+      } else {
+        for (const key of fileKeys) {
+          try {
+            await fs.unlink(path.join(uploadsDir, key))
+          } catch {
+            // Ignore missing files.
+          }
+        }
+      }
+    }
+    await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId])
+    io.to(`user:${req.userId}`).emit('conversation:refresh', { conversationId })
+    io.to(`user:${friendId}`).emit('conversation:refresh', { conversationId })
+  }
   return res.json({ ok: true })
 })
 
@@ -1333,6 +1508,41 @@ app.post('/api/conversations/:id/members', auth, async (req, res) => {
   return res.json({ ok: true })
 })
 
+app.post('/api/conversations/:id/clear', auth, async (req, res) => {
+  const conversationId = req.params.id
+  if (!(await isMember(conversationId, req.userId))) {
+    return res.status(404).json({ error: 'Conversation not found' })
+  }
+  await pool.query(
+    `UPDATE conversation_members
+     SET cleared_at = now()
+     WHERE conversation_id = $1 AND user_id = $2`,
+    [conversationId, req.userId]
+  )
+  io.to(`user:${req.userId}`).emit('conversation:refresh', { conversationId })
+  return res.json({ ok: true })
+})
+
+app.post('/api/conversations/:id/leave', auth, async (req, res) => {
+  const conversationId = req.params.id
+  const convo = await pool.query('SELECT * FROM conversations WHERE id = $1', [
+    conversationId,
+  ])
+  const conversation = convo.rows[0]
+  if (!conversation) {
+    return res.status(404).json({ error: 'Conversation not found' })
+  }
+  if (conversation.type !== 'group') {
+    return res.status(400).json({ error: 'Not a group conversation' })
+  }
+  await pool.query(
+    'DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2',
+    [conversationId, req.userId]
+  )
+  io.to(`user:${req.userId}`).emit('conversation:refresh', { conversationId })
+  return res.json({ ok: true })
+})
+
 app.delete('/api/conversations/:id/members/:userId', auth, async (req, res) => {
   const conversationId = req.params.id
   const targetUserId = req.params.userId
@@ -1360,6 +1570,13 @@ app.get('/api/conversations', auth, async (req, res) => {
             SELECT id, sender_id, type, text, file_id, created_at
             FROM messages
             WHERE conversation_id = c.id
+              AND (
+                (SELECT cleared_at FROM conversation_members
+                 WHERE conversation_id = c.id AND user_id = $1) IS NULL
+                OR created_at >
+                  (SELECT cleared_at FROM conversation_members
+                   WHERE conversation_id = c.id AND user_id = $1)
+              )
             ORDER BY created_at DESC
             LIMIT 1
           ) m
@@ -1376,6 +1593,8 @@ app.get('/api/conversations', auth, async (req, res) => {
         ) AS members
      FROM conversations c
      JOIN conversation_members cm ON cm.conversation_id = c.id
+     JOIN conversation_members cm_self
+       ON cm_self.conversation_id = c.id AND cm_self.user_id = $1
      JOIN users u ON u.id = cm.user_id
      WHERE c.id IN (
        SELECT conversation_id FROM conversation_members WHERE user_id = $1
@@ -1392,14 +1611,21 @@ app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   if (!(await isMember(conversationId, req.userId))) {
     return res.status(404).json({ error: 'Conversation not found' })
   }
+  const clearResult = await pool.query(
+    `SELECT cleared_at FROM conversation_members
+     WHERE conversation_id = $1 AND user_id = $2`,
+    [conversationId, req.userId]
+  )
+  const clearedAt = clearResult.rows[0]?.cleared_at
   const readResult = await pool.query(
     `INSERT INTO message_reads (message_id, user_id)
      SELECT m.id, $2
-     FROM messages m
-     WHERE m.conversation_id = $1 AND m.sender_id != $2
-     ON CONFLICT DO NOTHING
-     RETURNING message_id, read_at`,
-    [conversationId, req.userId]
+      FROM messages m
+      WHERE m.conversation_id = $1 AND m.sender_id != $2
+        AND ($3::timestamptz IS NULL OR m.created_at > $3)
+      ON CONFLICT DO NOTHING
+      RETURNING message_id, read_at`,
+    [conversationId, req.userId, clearedAt]
   )
   if (readResult.rows.length > 0) {
     io.to(conversationId).emit('message:read', {
@@ -1414,12 +1640,13 @@ app.get('/api/conversations/:id/messages', auth, async (req, res) => {
             array_remove(array_agg(mr.user_id), NULL) as read_by,
             max(mr.read_at) as read_at
      FROM messages m
-     LEFT JOIN files f ON f.id = m.file_id
-     LEFT JOIN message_reads mr ON mr.message_id = m.id
-     WHERE m.conversation_id = $1
-     GROUP BY m.id, f.id
-     ORDER BY m.created_at ASC`,
-    [conversationId]
+      LEFT JOIN files f ON f.id = m.file_id
+      LEFT JOIN message_reads mr ON mr.message_id = m.id
+      WHERE m.conversation_id = $1
+        AND ($2::timestamptz IS NULL OR m.created_at > $2)
+      GROUP BY m.id, f.id
+      ORDER BY m.created_at ASC`,
+    [conversationId, clearedAt]
   )
   const messages = result.rows.map((row) => ({
     id: row.id,
@@ -1542,17 +1769,18 @@ app.post(
   '/api/conversations/:id/files',
   auth,
   upload.single('file'),
-  async (req, res) => {
-    const conversationId = req.params.id
-    if (!(await isMember(conversationId, req.userId))) {
-      return res.status(404).json({ error: 'Conversation not found' })
-    }
-    if (!req.file) {
-      return res.status(400).json({ error: 'Missing file' })
-    }
-    const storageKey = useSupabaseStorage
-      ? `files/${conversationId}/${Date.now()}-${req.file.originalname}`
-      : req.file.filename
+    async (req, res) => {
+      const conversationId = req.params.id
+      if (!(await isMember(conversationId, req.userId))) {
+        return res.status(404).json({ error: 'Conversation not found' })
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'Missing file' })
+      }
+      const retentionDaysValue = await getRetentionDays()
+      const storageKey = useSupabaseStorage
+        ? `files/${conversationId}/${Date.now()}-${req.file.originalname}`
+        : req.file.filename
     if (useSupabaseStorage) {
       await uploadToStorage({
         filePath: req.file.path,
@@ -1567,15 +1795,15 @@ app.post(
        VALUES ($1, $2, $3, $4, $5, $6, now() + ($7 || ' days')::interval)
        RETURNING *`,
       [
-        conversationId,
-        req.userId,
-        req.file.originalname,
-        storageKey,
-        req.file.mimetype,
-        req.file.size,
-        retentionDays,
-      ]
-    )
+          conversationId,
+          req.userId,
+          req.file.originalname,
+          storageKey,
+          req.file.mimetype,
+          req.file.size,
+          retentionDaysValue,
+        ]
+      )
     const file = fileResult.rows[0]
     const replyTo = req.body?.replyTo || null
     const messageResult = await pool.query(
