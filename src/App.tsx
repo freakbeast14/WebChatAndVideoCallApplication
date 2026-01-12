@@ -2318,7 +2318,8 @@ function App() {
           confirmState.kind === 'delete-message' ||
           confirmState.kind === 'clear-chat' ||
           confirmState.kind === 'leave-group' ||
-          confirmState.kind === 'remove-friend'
+          confirmState.kind === 'remove-friend' ||
+          confirmState.kind === 'sign-out'
             ? 'danger'
             : 'default'
         }
