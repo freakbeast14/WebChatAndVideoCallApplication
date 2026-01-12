@@ -1,4 +1,4 @@
-import { Moon, Search, Settings, Sun, User, UserPlus, Users } from 'lucide-react'
+import { Moon, Search, Settings, Shield, Sun, User, UserPlus, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getAvatarSrc } from '@/lib/chat'
 import type { Conversation, User as UserType } from '@/types'
@@ -20,8 +20,10 @@ type ChatListProps = {
   onOpenGroups: () => void
   theme: 'dark' | 'light'
   onToggleTheme: () => void
-  view: 'chat' | 'account'
+  view: 'chat' | 'account' | 'admin'
   onOpenSettings: () => void
+  showAdmin: boolean
+  onOpenAdmin: () => void
   truncateText: (value: string, max?: number) => string
   className?: string
 }
@@ -40,6 +42,8 @@ const ChatList = ({
   onToggleTheme,
   view,
   onOpenSettings,
+  showAdmin,
+  onOpenAdmin,
   truncateText,
   className = '',
 }: ChatListProps) => (
@@ -64,6 +68,16 @@ const ChatList = ({
         >
           <Settings size={18} />
         </Button>
+        {showAdmin ? (
+          <Button
+            size="icon"
+            variant={view === 'admin' ? 'default' : 'ghost'}
+            onClick={onOpenAdmin}
+            title="Admin"
+          >
+            <Shield size={18} />
+          </Button>
+        ) : null}
       </div>
     </div>
     <div className="px-4 pb-3">
